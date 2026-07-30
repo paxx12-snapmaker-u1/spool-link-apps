@@ -12,8 +12,8 @@ android {
         applicationId "dev.pages.paxx12.spoollink"
         minSdk 26
         targetSdk 34
-        versionCode 1
-        versionName "0.1"
+        versionCode project.hasProperty('versionCode') ? (project.property('versionCode') as Integer) : 1
+        versionName project.hasProperty('versionName') ? project.property('versionName') : "0.1"
     }
 
     def keystorePath = System.getenv("ANDROID_KEYSTORE_PATH")
