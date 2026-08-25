@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-PackageHomePage: https://github.com/paxx12-snapmaker-u1/spool-link-apps
+// SPDX-FileCopyrightText: Copyright (c) 2026 @paxx12
+
 plugins {
     id 'com.android.application' version '8.7.3' apply false
     id 'org.jetbrains.kotlin.android' version '2.0.21' apply false
