@@ -50,9 +50,10 @@ struct SpoolResponse: Codable, Identifiable {
         } else {
             decoded = raw
         }
+        // Uppercase so lookups match the reader's UIDs even if another client stored lowercase.
         return decoded
             .components(separatedBy: ",")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .map { $0.trimmingCharacters(in: .whitespaces).uppercased() }
             .filter { !$0.isEmpty }
     }
 }

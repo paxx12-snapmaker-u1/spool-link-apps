@@ -58,7 +58,8 @@ data class SpoolResponse(
             val decoded = if (raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"'))
                 raw.drop(1).dropLast(1)
             else raw
-            return decoded.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+            // Uppercase so lookups match the reader's UIDs even if another client stored lowercase.
+            return decoded.split(",").map { it.trim().uppercase() }.filter { it.isNotEmpty() }
         }
 
     val tagCount: Int get() = tagUIDs.size
