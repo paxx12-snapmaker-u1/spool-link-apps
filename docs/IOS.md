@@ -33,8 +33,10 @@ tag UID from the current spool).
 ## Assign to Existing Spool
 
 Searchable list of all spools on the Spoolman server. Selecting one links the scanned
-tag UID to that spool. A tag can only belong to one spool at a time — if it was
-previously assigned elsewhere, it is automatically removed from that spool.
+tag UID to that spool. A tag can only belong to one spool at a time — if it is on
+another spool (shown in the scan result, e.g. when you tap **Change Spool**), it is
+moved without a further prompt and removed from there. Choosing a spool that already
+has the tag shows an error.
 
 > **Tip:** Spools typically have two tags, one attached to each side. Assign both tags
 > to the same spool so it is detected no matter which side faces the reader.
@@ -73,7 +75,9 @@ open the spool directly in Spoolman.
 ## Spool Detail — Assign NFC Tag
 
 Tapping **Assign NFC Tag** opens the system NFC reader sheet. Hold the device near a
-tag to link it to the spool.
+tag to link it to the spool. The result appears under the button. If the tag is already
+on this spool you get an error; if it belongs to another spool you are asked to confirm
+moving it.
 
 <a href="images/ios/10-spool-detail-assign-tag.png"><img src="images/ios/10-spool-detail-assign-tag.png" alt="Spool detail assign tag" height="520" /></a>
 

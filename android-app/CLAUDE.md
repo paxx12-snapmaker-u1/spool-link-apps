@@ -73,6 +73,11 @@ Key ViewModel methods: `ensureSpoolsLoaded()`, `fetchSpools(reset)`, `loadMoreSp
 `removeAllTags(spool)`, `createSpoolFromTag()`, `loadFilaments()`, `loadFilamentsIfNeeded()`, `updatePresets(presets)`,
 `savedBaseUrl()`, `updateBaseUrl(url)`, `savedNameStyle()`, `saveNameStyle(style)`.
 
+`processAssignment()` returns a `TagAssignmentOutcome`. If the tag is on another spool it sets `pendingTagMove` and
+writes nothing (unless called with `confirmMove = false`, as `AssignSpoolSheet` does, which moves it directly); the UI confirms with `confirmTagMove(move)` or calls `declineTagMove()`. Errors (including "already
+assigned") set `assignmentError`. Screens that start an assignment call the `TagAssignmentPrompts` composable (in
+`SpoolsScreen.kt`) to show both, and show `lastAssignmentResult` inline.
+
 ## API Paths
 
 All Spoolman endpoints are under `api/v1/`:

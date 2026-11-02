@@ -480,6 +480,13 @@ struct SpoolDetailSheet: View {
                         .tint(.blue)
                         .disabled(isAssigning)
 
+                        if !isAssigning, let result = viewModel.lastAssignmentResult, result.spoolId == spool.id {
+                            Label(result.message, systemImage: result.success ? "checkmark.circle.fill" : "xmark.circle.fill")
+                                .font(.subheadline)
+                                .foregroundStyle(result.success ? .green : .red)
+                                .frame(maxWidth: .infinity)
+                        }
+
                         if let url = spoolWebURL {
                             Link(destination: url) {
                                 Label("Open in Spoolman", systemImage: "safari")
@@ -496,6 +503,7 @@ struct SpoolDetailSheet: View {
             }
             .navigationTitle("Spool Info")
             .navigationBarTitleDisplayMode(.inline)
+            .modifier(TagAssignmentPrompts(viewModel: viewModel, owns: { $0.spool.id == spool.id }))
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { dismiss() }
@@ -643,4 +651,54 @@ private struct DetailRow<Content: View>: View {
 
 #Preview {
     SpoolsView(viewModel: SpoolmanViewModel())
+}
+
+// MARK: - Tag assignment prompts
+
+/// Presents the move-tag confirmation and assignment error alerts for views that start tag assignments.
+struct TagAssignmentPrompts: ViewModifier {
+    @Bindable var viewModel: SpoolmanViewModel
+    /// Whether a pending move belongs to this view (several views use this modifier). The default is for views
+    /// that never ask to confirm a move.
+    var owns: (PendingTagMove) -> Bool = { _ in false }
+
+    private var showMove: Binding<Bool> {
+        Binding(
+            get: { viewModel.pendingTagMove.map(owns) ?? false },
+            set: { if !$0 { viewModel.declineTagMove() } }
+        )
+    }
+
+    private var showError: Binding<Bool> {
+        Binding(
+            get: { viewModel.assignmentError != nil },
+            set: { if !$0 { viewModel.assignmentError = nil } }
+        )
+    }
+
+    func body(content: Content) -> some View {
+        // An alert (not confirmationDialog) so Cancel is always an explicit button; recent iOS shows
+        // confirmation dialogs as popovers without one.
+        content
+            .alert("Move Tag?", isPresented: showMove, presenting: viewModel.pendingTagMove) { move in
+                Button("Cancel", role: .cancel) { viewModel.declineTagMove() }
+                Button("Move Tag") {
+                    // Clear synchronously so the alert's dismissal isn't recorded as a decline.
+                    viewModel.pendingTagMove = nil
+                    Task { await viewModel.confirmTagMove(move) }
+                }
+            } message: { move in
+                Text("This tag is assigned to \(move.ownersDescription). Move it to \(move.spool.displayName) (#\(move.spool.id))?")
+            }
+            // Attached to a background so it doesn't compete with the move alert on the same view.
+            .background {
+                Color.clear
+                    .alert(viewModel.assignmentError?.title ?? "", isPresented: showError,
+                           presenting: viewModel.assignmentError) { _ in
+                        Button("OK", role: .cancel) {}
+                    } message: { error in
+                        Text(error.message)
+                    }
+            }
+    }
 }

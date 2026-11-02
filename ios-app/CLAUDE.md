@@ -78,6 +78,12 @@ Key methods: `ensureSpoolsLoaded()`, `fetchSpools(reset:)`, `loadMoreSpools()`, 
   the list is currently empty.
 - `processTag` and `processAssignment` own the "add to current spool, remove from others" sync logic.
   Do not duplicate this in views.
+- `processAssignment` returns a `TagAssignmentOutcome`. If the tag is on another spool it sets
+  `pendingTagMove` and writes nothing (unless called with `confirmMove: false`, as `AssignSpoolSheet` does,
+  which moves it directly); the view confirms with `confirmTagMove(_:)` or calls
+  `declineTagMove()`. Errors (including "already assigned") set `assignmentError`. Views that start an
+  assignment apply the `TagAssignmentPrompts` modifier (in `SpoolsView.swift`) to present both, and show
+  `lastAssignmentResult` inline.
 
 ## `FilamentMetadata`
 
