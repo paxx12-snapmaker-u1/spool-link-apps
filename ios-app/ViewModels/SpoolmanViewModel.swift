@@ -111,7 +111,9 @@ class SpoolmanViewModel: NFCManagerDelegate {
 
     @MainActor
     func removeTag(uidHex: String, from spool: SpoolResponse) async {
-        let updatedUIDs = spool.tagUIDs.filter { $0.uppercased() != uidHex.uppercased() }
+        // The caller's spool may be a stale snapshot; filtering it would drop tags assigned since.
+        let currentUIDs = (try? await api.getSpool(id: spool.id))?.tagUIDs ?? spool.tagUIDs
+        let updatedUIDs = currentUIDs.filter { $0.uppercased() != uidHex.uppercased() }
         try? await api.updateSpoolCardUids(id: spool.id, uids: updatedUIDs)
         await refreshSpool(id: spool.id)
         if let result = lastResult, result.spoolId == spool.id {
@@ -346,7 +348,8 @@ class SpoolmanViewModel: NFCManagerDelegate {
         statusMessage = "Assigning tag to \(spool.displayName)…"
 
         do {
-            let currentUIDs = spool.tagUIDs
+            // The caller's spool may be a stale snapshot; building on it would drop tags assigned since.
+            let currentUIDs = try await api.getSpool(id: spool.id).tagUIDs
             let updatedUIDs = currentUIDs.contains(uidHex) ? currentUIDs : currentUIDs + [uidHex]
             try await api.updateSpoolCardUids(id: spool.id, uids: updatedUIDs)
 
