@@ -229,10 +229,14 @@ class SpoolmanViewModel: NFCManagerDelegate {
     }
 
     func startTagAssignment(for spool: SpoolResponse) {
-        pendingAssignSpool = spool
         lastResult = nil
-        nfcManager.startScanning()
-        isScanning = nfcManager.isScanning
+        // Leaving pendingAssignSpool set without a session would keep the Assign button spinning forever.
+        guard nfcManager.startScanning() else {
+            statusMessage = nfcManager.sessionMessage
+            return
+        }
+        pendingAssignSpool = spool
+        isScanning = true
         statusMessage = "Scan tag to assign to \(spool.displayName)…"
     }
 
@@ -266,7 +270,7 @@ class SpoolmanViewModel: NFCManagerDelegate {
     func nfcManagerDidInvalidateSession(_ manager: NFCManager, error: Error?) {
         isScanning = false
         pendingAssignSpool = nil
-        if let error { statusMessage = "Session ended: \(error.localizedDescription)" }
+        statusMessage = error.map { "Session ended: \($0.localizedDescription)" } ?? "Scanning stopped"
     }
 
     // MARK: - Tag processing
