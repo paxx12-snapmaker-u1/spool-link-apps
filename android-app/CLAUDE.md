@@ -119,6 +119,8 @@ Visibility pattern: expose as `private set` where the UI only reads, no setter o
 - `base_url` — Spoolman server URL (normalized: always ends with `/`, has `http://` prefix)
 - `filamentNameStyle` — `FilamentNameStyle.name` enum name
 - `filamentPresets` — JSON-encoded `FilamentPresets`
+- `spools_sort_by` / `spools_sort_ascending` — Spools screen `SpoolSort.name` and direction (read in `SpoolsScreen`)
+- `spools_group_by` — Spools screen `SpoolGrouping.name` (read in `SpoolsScreen`)
 
 The ViewModel accesses preferences via `application.getSharedPreferences(...)` since it extends `AndroidViewModel`.
 

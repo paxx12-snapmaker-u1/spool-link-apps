@@ -21,7 +21,7 @@ class SpoolmanViewModel: NFCManagerDelegate {
     var isLoadingFilaments = false
     var filamentsErrorMessage: String?
     private var spoolsOffset = 0
-    // Large enough to load every spool at once so sorting and grouping see the whole collection;
+    // Large enough to load every spool at once so sort, grouping, search, and filter see the whole collection;
     // "Load More" only appears beyond this.
     private let spoolsPageSize = 1000
     private var lastSpoolsFetch: Date?

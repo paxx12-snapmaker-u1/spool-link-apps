@@ -169,13 +169,18 @@ Shown below the tag table when a Spoolman spool is associated:
 - 44×44 `ColorSwatch` per row (`cornerRadius: 10`)
 - Name (headline), material capsule, `#id`, remaining weight, `TagCountBadge`
 - Conflict indicator: `exclamationmark.triangle.fill` in orange if a UID is on multiple spools
-- Grouped by `SpoolSort` with section headers; sort persisted in `@AppStorage("spoolsSortBy")` /
-  `@AppStorage("spoolsSortAscending")`
+- Sort persisted in `@AppStorage("spoolsSortBy")` / `@AppStorage("spoolsSortAscending")`
 - Sort options: Date Added, Last Used, Name, Material, Remaining, Tags
+- Grouping (`SpoolGrouping`, "Group by" section of the sort menu, `@AppStorage("spoolsGroupBy")`): Match Sort
+  (sections follow `SpoolSort`, default), None, Material, Vendor, Tags. Section headers show item counts.
+- `.searchable`: matches name/vendor, material, lot number, `#id` (exact), and tag UID (separators ignored)
+- Filter menu: tag status (All / Tagged / Untagged) and multi-select material (case-insensitive). Icon fills
+  while a filter is active. No matches shows a `ContentUnavailableView` overlay with "Clear Search & Filters".
 - Loads up to 1000 spools per request; auto-triggered "Load More" row only beyond that
 - Refreshes on appear and on returning to the foreground (skipped within 15 s of the last load);
   pull-to-refresh; a failed refresh shows an inline "Couldn't refresh" banner above the list
-- Toolbar: refresh (leading, `arrow.clockwise`), sort menu (trailing, `arrow.up.arrow.down`)
+- Toolbar: refresh (leading, `arrow.clockwise`); filter menu (`line.3.horizontal.decrease.circle`) and
+  sort/group menu (`arrow.up.arrow.down`) trailing
 
 ### Spool Detail Sheet (`SpoolDetailSheet`)
 

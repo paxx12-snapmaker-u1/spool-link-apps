@@ -57,8 +57,14 @@ to that filament's values (shown with lock icons).
 
 ## Spools
 
-Full spool list fetched from Spoolman, ordered by the active filter. Each row shows the
-color swatch, filament name, material, remaining weight, and tag count.
+Full spool list fetched from Spoolman, ordered by the active sort. Each row shows the
+color swatch, filament name, material, remaining weight, and tag count. The list refreshes
+automatically when you open the tab or return to the app.
+
+- **Search** by name, vendor, material, lot number, `#id`, or tag UID — handy for finding
+  which spool a tag belongs to.
+- **Filter** (funnel button) by tag status (tagged / untagged) and material.
+- **Group by** (in the sort menu): follow the sort, or group by material, vendor, or tag count.
 
 <a href="images/ios/08-spools-list.png"><img src="images/ios/08-spools-list.png" alt="Spools list" height="520" /></a>
 

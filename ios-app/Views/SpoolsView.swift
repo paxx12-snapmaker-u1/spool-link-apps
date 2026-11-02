@@ -27,21 +27,22 @@ enum SpoolSort: String, CaseIterable, Identifiable {
         }
     }
 
-    func compare(_ a: SpoolResponse, _ b: SpoolResponse, ascending: Bool) -> Bool {
-        let flip: (Bool) -> Bool = { ascending ? $0 : !$0 }
+    // Descending swaps the operands rather than negating, so ties stay unordered (a strict ordering, as sort requires).
+    func compare(_ lhs: SpoolResponse, _ rhs: SpoolResponse, ascending: Bool) -> Bool {
+        let (a, b) = ascending ? (lhs, rhs) : (rhs, lhs)
         switch self {
         case .dateAdded:
-            return flip((a.registered ?? .distantPast) > (b.registered ?? .distantPast))
+            return (a.registered ?? .distantPast) > (b.registered ?? .distantPast)
         case .lastUsed:
-            return flip((a.lastUsed ?? .distantPast) > (b.lastUsed ?? .distantPast))
+            return (a.lastUsed ?? .distantPast) > (b.lastUsed ?? .distantPast)
         case .name:
-            return flip(a.displayName < b.displayName)
+            return a.displayName.localizedStandardCompare(b.displayName) == .orderedAscending
         case .material:
-            return flip((a.filament.material ?? "") < (b.filament.material ?? ""))
+            return (a.materialKey ?? "") < (b.materialKey ?? "")
         case .remaining:
-            return flip((a.remainingWeight ?? 0) > (b.remainingWeight ?? 0))
+            return (a.remainingWeight ?? 0) > (b.remainingWeight ?? 0)
         case .tags:
-            return flip(a.tagCount > b.tagCount)
+            return a.tagCount > b.tagCount
         }
     }
 
@@ -79,7 +80,7 @@ enum SpoolSort: String, CaseIterable, Identifiable {
             default:        return "#"
             }
         case .material:
-            return spool.filament.material ?? "Unknown"
+            return spool.materialKey ?? "Unknown"
         case .remaining:
             guard let w = spool.remainingWeight else { return "Unknown" }
             if w == 0      { return "Empty" }
@@ -97,16 +98,126 @@ enum SpoolSort: String, CaseIterable, Identifiable {
 
     func grouped(_ spools: [SpoolResponse], ascending: Bool) -> [(header: String, items: [SpoolResponse])] {
         let sorted = spools.sorted { compare($0, $1, ascending: ascending) }
-        var result: [(String, [SpoolResponse])] = []
+        // Merge by header, not just adjacent runs: ties (e.g. nil vs 0 g remaining) can interleave headers,
+        // and duplicate headers would collide as section IDs.
+        var result: [(header: String, items: [SpoolResponse])] = []
+        var indexByHeader: [String: Int] = [:]
         for spool in sorted {
             let h = sectionHeader(for: spool)
-            if result.last?.0 == h {
-                result[result.count - 1].1.append(spool)
+            if let i = indexByHeader[h] {
+                result[i].items.append(spool)
             } else {
-                result.append((h, [spool]))
+                indexByHeader[h] = result.count
+                result.append((header: h, items: [spool]))
             }
         }
-        return result.map { (header: $0.0, items: $0.1) }
+        return result
+    }
+}
+
+// MARK: - Grouping & filtering
+
+/// How the list is sectioned, independently of sort order. `matchSort` keeps the sort-derived sections.
+enum SpoolGrouping: String, CaseIterable, Identifiable {
+    case matchSort = "Match Sort"
+    case ungrouped = "None"
+    case material  = "Material"
+    case vendor    = "Vendor"
+    case tags      = "Tags"
+
+    var id: String { rawValue }
+
+    var icon: String {
+        switch self {
+        case .matchSort: return "arrow.up.arrow.down"
+        case .ungrouped: return "list.bullet"
+        case .material:  return "cube"
+        case .vendor:    return "building.2"
+        case .tags:      return "wave.3.right"
+        }
+    }
+
+    func grouped(_ spools: [SpoolResponse], sort: SpoolSort, ascending: Bool) -> [(header: String, items: [SpoolResponse])] {
+        switch self {
+        case .matchSort:
+            return sort.grouped(spools, ascending: ascending)
+        case .ungrouped:
+            let sorted = spools.sorted { sort.compare($0, $1, ascending: ascending) }
+            return sorted.isEmpty ? [] : [(header: "", items: sorted)]
+        case .material, .vendor, .tags:
+            let sorted = spools.sorted { sort.compare($0, $1, ascending: ascending) }
+            let buckets = Dictionary(grouping: sorted) { header(for: $0) }
+            return buckets.keys
+                .sorted { (rank($0), $0.localizedLowercase) < (rank($1), $1.localizedLowercase) }
+                .map { (header: $0, items: buckets[$0] ?? []) }
+        }
+    }
+
+    private static let unknownMaterial = "Unknown"
+    private static let noVendor = "No Vendor"
+
+    private func header(for spool: SpoolResponse) -> String {
+        switch self {
+        case .material:
+            return spool.materialKey ?? Self.unknownMaterial
+        case .vendor:
+            let name = spool.filament.vendor?.name?.trimmingCharacters(in: .whitespaces) ?? ""
+            return name.isEmpty ? Self.noVendor : name
+        case .tags:
+            return SpoolSort.tags.sectionHeader(for: spool)
+        case .matchSort, .ungrouped:
+            return ""
+        }
+    }
+
+    // Natural order for Tags; catch-all buckets after named ones.
+    private func rank(_ header: String) -> Int {
+        switch header {
+        case "No Tags":                           return 0
+        case "1 Tag":                             return 1
+        case "Multiple Tags":                     return 2
+        case Self.unknownMaterial, Self.noVendor: return 3
+        default:                                  return 1
+        }
+    }
+}
+
+enum SpoolTagFilter: String, CaseIterable, Identifiable {
+    case all      = "All"
+    case tagged   = "Tagged"
+    case untagged = "Untagged"
+
+    var id: String { rawValue }
+
+    func matches(_ spool: SpoolResponse) -> Bool {
+        switch self {
+        case .all:      return true
+        case .tagged:   return spool.tagCount > 0
+        case .untagged: return spool.tagCount == 0
+        }
+    }
+}
+
+extension SpoolResponse {
+    /// Material normalised for filtering and grouping ("pla " and "PLA" are the same); nil when unset.
+    var materialKey: String? {
+        let m = filament.material?.trimmingCharacters(in: .whitespaces).uppercased() ?? ""
+        return m.isEmpty ? nil : m
+    }
+
+    /// Name/vendor, material, or lot number substring; "#12" for an exact id; or part of a tag UID.
+    func matchesSearch(_ query: String) -> Bool {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return true }
+        if q.hasPrefix("#"), let n = Int(q.dropFirst()) { return id == n }
+        if [displayName, filament.material, lotNr].compactMap({ $0 }).contains(where: { $0.localizedCaseInsensitiveContains(q) }) {
+            return true
+        }
+        // Allow UIDs typed or pasted with separators, e.g. "04:A1:B2:C3". Only when the whole query looks
+        // like a UID, otherwise the hex letters in a word ("Wood" -> "D") would match unrelated tags.
+        guard q.allSatisfy({ $0.isHexDigit || ":- ".contains($0) }) else { return false }
+        let hex = q.uppercased().filter { $0.isHexDigit }
+        return !hex.isEmpty && tagUIDs.contains { $0.contains(hex) }
     }
 }
 
@@ -117,12 +228,33 @@ struct SpoolsView: View {
     @State private var selectedSpool: SpoolResponse?
     @AppStorage("spoolsSortBy") private var sortByRaw: String = SpoolSort.dateAdded.rawValue
     @AppStorage("spoolsSortAscending") private var sortAscending = true
+    @AppStorage("spoolsGroupBy") private var groupByRaw: String = SpoolGrouping.matchSort.rawValue
+    @State private var searchText = ""
+    @State private var materialFilter: Set<String> = []
+    @State private var tagFilter: SpoolTagFilter = .all
     @Environment(\.scenePhase) private var scenePhase
 
     private var sortBy: SpoolSort { SpoolSort(rawValue: sortByRaw) ?? .dateAdded }
+    private var groupBy: SpoolGrouping { SpoolGrouping(rawValue: groupByRaw) ?? .matchSort }
+
+    private var isFiltering: Bool { !materialFilter.isEmpty || tagFilter != .all }
+
+    // Includes selected materials no longer present after a refresh, so an active filter stays visible.
+    private var availableMaterials: [String] {
+        Set(viewModel.spools.compactMap(\.materialKey)).union(materialFilter)
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    }
+
+    private var filteredSpools: [SpoolResponse] {
+        viewModel.spools.filter { spool in
+            tagFilter.matches(spool)
+                && (materialFilter.isEmpty || spool.materialKey.map(materialFilter.contains) == true)
+                && spool.matchesSearch(searchText)
+        }
+    }
 
     private var groupedSpools: [(header: String, items: [SpoolResponse])] {
-        sortBy.grouped(viewModel.spools, ascending: sortAscending)
+        groupBy.grouped(filteredSpools, sort: sortBy, ascending: sortAscending)
     }
 
     private var duplicateTagUIDs: Set<String> {
@@ -135,6 +267,7 @@ struct SpoolsView: View {
 
     @ViewBuilder private var spoolsContent: some View {
         let duplicates = duplicateTagUIDs
+        let groups = groupedSpools
         if viewModel.isFetchingSpools && viewModel.spools.isEmpty {
             ProgressView("Loading spools…")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -150,12 +283,16 @@ struct SpoolsView: View {
             )
         } else {
             List {
-                ForEach(groupedSpools, id: \.header) { group in
-                    Section(group.header) {
+                ForEach(groups, id: \.header) { group in
+                    Section {
                         ForEach(group.items) { spool in
                             SpoolRow(spool: spool, hasConflict: spool.tagUIDs.contains { duplicates.contains($0) })
                                 .contentShape(Rectangle())
                                 .onTapGesture { selectedSpool = spool }
+                        }
+                    } header: {
+                        if !group.header.isEmpty {
+                            Text("\(group.header) (\(group.items.count))")
                         }
                     }
                 }
@@ -174,6 +311,22 @@ struct SpoolsView: View {
                 }
             }
             .refreshable { await viewModel.loadSpools(reset: true) }
+            // An overlay rather than a separate branch keeps pull-to-refresh and "Load More" reachable.
+            .overlay {
+                if groups.isEmpty {
+                    ContentUnavailableView {
+                        Label("No Matching Spools", systemImage: "magnifyingglass")
+                    } description: {
+                        Text("No spools match the current search or filters.")
+                    } actions: {
+                        Button("Clear Search & Filters") {
+                            searchText = ""
+                            materialFilter = []
+                            tagFilter = .all
+                        }
+                    }
+                }
+            }
             .safeAreaInset(edge: .top) {
                 if let error = viewModel.spoolsErrorMessage {
                     Label("Couldn't refresh: \(error)", systemImage: "exclamationmark.triangle.fill")
@@ -191,6 +344,7 @@ struct SpoolsView: View {
     var body: some View {
         NavigationStack {
             spoolsContent
+                .searchable(text: $searchText, prompt: "Name, material, #id, or tag UID")
                 .navigationTitle("Spools")
                 .toolbar {
                     ToolbarItem(placement: .topBarLeading) {
@@ -198,6 +352,9 @@ struct SpoolsView: View {
                             Image(systemName: "arrow.clockwise")
                         }
                         .disabled(viewModel.isFetchingSpools)
+                    }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        filterMenu
                     }
                     ToolbarItem(placement: .topBarTrailing) {
                         sortMenu
@@ -211,6 +368,42 @@ struct SpoolsView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { viewModel.refreshSpoolsIfStale() }
         }
+    }
+
+    private var filterMenu: some View {
+        Menu {
+            Section("Tags") {
+                Picker("Tags", selection: $tagFilter) {
+                    ForEach(SpoolTagFilter.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.inline)
+            }
+            if !availableMaterials.isEmpty {
+                Section("Material") {
+                    ForEach(availableMaterials, id: \.self) { material in
+                        Toggle(material, isOn: Binding(
+                            get: { materialFilter.contains(material) },
+                            set: { isOn in
+                                if isOn { materialFilter.insert(material) } else { materialFilter.remove(material) }
+                            }
+                        ))
+                    }
+                }
+            }
+            if isFiltering {
+                Section {
+                    Button("Clear Filters", role: .destructive) {
+                        materialFilter = []
+                        tagFilter = .all
+                    }
+                }
+            }
+        } label: {
+            Label("Filter", systemImage: "line.3.horizontal.decrease.circle")
+                .symbolVariant(isFiltering ? .fill : .none)
+        }
+        // Keep the menu open so several materials can be toggled in one go.
+        .menuActionDismissBehavior(.disabled)
     }
 
     private var sortMenu: some View {
@@ -232,6 +425,14 @@ struct SpoolsView: View {
                         )
                     }
                 }
+            }
+            Section("Group by") {
+                Picker("Group by", selection: $groupByRaw) {
+                    ForEach(SpoolGrouping.allCases) { grouping in
+                        Label(grouping.rawValue, systemImage: grouping.icon).tag(grouping.rawValue)
+                    }
+                }
+                .pickerStyle(.inline)
             }
         } label: {
             Label("Sort", systemImage: "arrow.up.arrow.down")

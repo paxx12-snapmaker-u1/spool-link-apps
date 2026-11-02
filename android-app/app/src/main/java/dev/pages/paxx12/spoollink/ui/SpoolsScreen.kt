@@ -14,6 +14,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -41,8 +42,8 @@ enum class SpoolSort(val label: String) {
         val r: Boolean = when (this) {
             DATE_ADDED -> (parseIso8601(a.registered) ?: Date(0)) > (parseIso8601(b.registered) ?: Date(0))
             LAST_USED -> (parseIso8601(a.lastUsed) ?: Date(0)) > (parseIso8601(b.lastUsed) ?: Date(0))
-            NAME -> a.displayName < b.displayName
-            MATERIAL -> (a.filament.material ?: "") < (b.filament.material ?: "")
+            NAME -> a.displayName.compareTo(b.displayName, ignoreCase = true) < 0
+            MATERIAL -> (a.materialKey ?: "") < (b.materialKey ?: "")
             REMAINING -> (a.remainingWeight ?: 0.0) > (b.remainingWeight ?: 0.0)
             TAGS -> a.tagCount > b.tagCount
         }
@@ -79,7 +80,7 @@ enum class SpoolSort(val label: String) {
                     in 'P'..'T' -> "P – T"; in 'U'..'Z' -> "U – Z"; else -> "#"
                 }
             }
-            MATERIAL -> spool.filament.material ?: "Unknown"
+            MATERIAL -> spool.materialKey ?: "Unknown"
             REMAINING -> {
                 val w = spool.remainingWeight
                 when {
@@ -91,16 +92,89 @@ enum class SpoolSort(val label: String) {
         }
     }
 
-    fun grouped(spools: List<SpoolResponse>, ascending: Boolean): List<Pair<String, List<SpoolResponse>>> {
-        val sorted = spools.sortedWith { a, b -> if (compare(a, b, ascending)) -1 else 1 }
-        val result = mutableListOf<Pair<String, MutableList<SpoolResponse>>>()
-        for (spool in sorted) {
-            val h = sectionHeader(spool)
-            if (result.lastOrNull()?.first == h) result.last().second.add(spool)
-            else result.add(h to mutableListOf(spool))
+    // compare() is a strict "comes before" relation; ties must map to 0 or sortedWith can throw
+    // "Comparison method violates its general contract".
+    fun comparator(ascending: Boolean): Comparator<SpoolResponse> = Comparator { a, b ->
+        when {
+            compare(a, b, ascending = true) -> if (ascending) -1 else 1
+            compare(b, a, ascending = true) -> if (ascending) 1 else -1
+            else -> 0
         }
-        return result.map { it.first to it.second.toList() }
     }
+
+    fun grouped(spools: List<SpoolResponse>, ascending: Boolean): List<Pair<String, List<SpoolResponse>>> {
+        val sorted = spools.sortedWith(comparator(ascending))
+        // Merge by header, not just adjacent runs: ties (e.g. no weight vs 0 g) can interleave headers.
+        val result = linkedMapOf<String, MutableList<SpoolResponse>>()
+        for (spool in sorted) result.getOrPut(sectionHeader(spool)) { mutableListOf() }.add(spool)
+        return result.map { it.key to it.value.toList() }
+    }
+}
+
+/** How the list is sectioned, independently of sort order. MATCH_SORT keeps the sort-derived sections. */
+enum class SpoolGrouping(val label: String) {
+    MATCH_SORT("Match Sort"),
+    NONE("None"),
+    MATERIAL("Material"),
+    VENDOR("Vendor"),
+    TAGS("Tags");
+
+    fun grouped(spools: List<SpoolResponse>, sort: SpoolSort, ascending: Boolean): List<Pair<String, List<SpoolResponse>>> {
+        if (this == MATCH_SORT) return sort.grouped(spools, ascending)
+        val sorted = spools.sortedWith(sort.comparator(ascending))
+        if (this == NONE) return if (sorted.isEmpty()) emptyList() else listOf("" to sorted)
+        return sorted.groupBy { header(it) }.toList()
+            .sortedWith(compareBy({ rank(it.first) }, { it.first.lowercase() }))
+    }
+
+    private fun header(spool: SpoolResponse): String = when (this) {
+        MATERIAL -> spool.materialKey ?: UNKNOWN_MATERIAL
+        VENDOR -> spool.filament.vendor?.name?.trim()?.takeIf { it.isNotEmpty() } ?: NO_VENDOR
+        TAGS -> SpoolSort.TAGS.sectionHeader(spool)
+        MATCH_SORT, NONE -> ""
+    }
+
+    // Natural order for Tags; catch-all buckets after named ones.
+    private fun rank(header: String): Int = when (header) {
+        "No Tags" -> 0
+        "1 Tag" -> 1
+        "Multiple Tags" -> 2
+        UNKNOWN_MATERIAL, NO_VENDOR -> 3
+        else -> 1
+    }
+
+    companion object {
+        private const val UNKNOWN_MATERIAL = "Unknown"
+        private const val NO_VENDOR = "No Vendor"
+    }
+}
+
+enum class SpoolTagFilter(val label: String) {
+    ALL("All"), TAGGED("Tagged"), UNTAGGED("Untagged");
+
+    fun matches(spool: SpoolResponse): Boolean = when (this) {
+        ALL -> true
+        TAGGED -> spool.tagCount > 0
+        UNTAGGED -> spool.tagCount == 0
+    }
+}
+
+/** Material normalised for filtering and grouping ("pla " and "PLA" are the same); null when unset. */
+val SpoolResponse.materialKey: String?
+    get() = filament.material?.trim()?.uppercase()?.takeIf { it.isNotEmpty() }
+
+/** Name/vendor, material, or lot number substring; "#12" for an exact id; or part of a tag UID. */
+fun SpoolResponse.matchesSearch(query: String): Boolean {
+    val q = query.trim()
+    if (q.isEmpty()) return true
+    if (q.startsWith("#")) q.drop(1).toIntOrNull()?.let { return id == it }
+    if (listOfNotNull(displayName, filament.material, lotNr).any { it.contains(q, ignoreCase = true) }) return true
+    // Allow UIDs typed or pasted with separators, e.g. "04:A1:B2:C3". Only when the whole query looks
+    // like a UID, otherwise the hex letters in a word ("Wood" -> "D") would match unrelated tags.
+    val upper = q.uppercase()
+    if (!upper.all { it in '0'..'9' || it in 'A'..'F' || it in ":- " }) return false
+    val hex = upper.filter { it in '0'..'9' || it in 'A'..'F' }
+    return hex.isNotEmpty() && tagUIDs.any { it.contains(hex) }
 }
 
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
@@ -112,9 +186,25 @@ fun SpoolsScreen(viewModel: SpoolmanViewModel) {
     var sortBy by remember { mutableStateOf(SpoolSort.entries.find { it.name == prefs.getString("spools_sort_by", null) } ?: SpoolSort.DATE_ADDED) }
     var sortAscending by remember { mutableStateOf(prefs.getBoolean("spools_sort_ascending", true)) }
     var showSortMenu by remember { mutableStateOf(false) }
+    var groupBy by remember { mutableStateOf(SpoolGrouping.entries.find { it.name == prefs.getString("spools_group_by", null) } ?: SpoolGrouping.MATCH_SORT) }
+    var searchText by rememberSaveable { mutableStateOf("") }
+    var materialFilter by remember { mutableStateOf(setOf<String>()) }
+    var tagFilter by remember { mutableStateOf(SpoolTagFilter.ALL) }
+    var showFilterMenu by remember { mutableStateOf(false) }
+    val isFiltering = materialFilter.isNotEmpty() || tagFilter != SpoolTagFilter.ALL
 
-    val grouped = remember(viewModel.spools.toList(), sortBy, sortAscending) {
-        sortBy.grouped(viewModel.spools.toList(), sortAscending)
+    val spoolList = viewModel.spools.toList()
+    // Includes selected materials no longer present after a refresh, so an active filter stays visible.
+    val availableMaterials = remember(spoolList, materialFilter) {
+        (spoolList.mapNotNull { it.materialKey }.toSet() + materialFilter).sorted()
+    }
+    val grouped = remember(spoolList, sortBy, sortAscending, groupBy, searchText, materialFilter, tagFilter) {
+        val filtered = spoolList.filter { spool ->
+            tagFilter.matches(spool) &&
+                (materialFilter.isEmpty() || spool.materialKey in materialFilter) &&
+                spool.matchesSearch(searchText)
+        }
+        groupBy.grouped(filtered, sortBy, sortAscending)
     }
 
     val duplicateTagUIDs = remember(viewModel.spools.toList()) {
@@ -145,6 +235,56 @@ fun SpoolsScreen(viewModel: SpoolmanViewModel) {
                         Icon(Icons.Default.Refresh, contentDescription = "Refresh")
                     }
                     Box {
+                        IconButton(onClick = { showFilterMenu = true }) {
+                            Icon(Icons.Default.FilterList, contentDescription = "Filter",
+                                tint = if (isFiltering) MaterialTheme.colorScheme.primary
+                                else LocalContentColor.current)
+                        }
+                        DropdownMenu(expanded = showFilterMenu, onDismissRequest = { showFilterMenu = false }) {
+                            Text("Tags", style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+                            SpoolTagFilter.entries.forEach { filter ->
+                                DropdownMenuItem(
+                                    text = { Text(filter.label) },
+                                    trailingIcon = {
+                                        if (tagFilter == filter) Icon(Icons.Default.Check, contentDescription = null)
+                                    },
+                                    onClick = { tagFilter = filter }
+                                )
+                            }
+                            if (availableMaterials.isNotEmpty()) {
+                                HorizontalDivider()
+                                Text("Material", style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+                                availableMaterials.forEach { material ->
+                                    val selected = material in materialFilter
+                                    DropdownMenuItem(
+                                        text = { Text(material) },
+                                        trailingIcon = {
+                                            if (selected) Icon(Icons.Default.Check, contentDescription = null)
+                                        },
+                                        onClick = {
+                                            materialFilter = if (selected) materialFilter - material else materialFilter + material
+                                        }
+                                    )
+                                }
+                            }
+                            if (isFiltering) {
+                                HorizontalDivider()
+                                DropdownMenuItem(
+                                    text = { Text("Clear Filters", color = MaterialTheme.colorScheme.error) },
+                                    onClick = {
+                                        materialFilter = emptySet()
+                                        tagFilter = SpoolTagFilter.ALL
+                                        showFilterMenu = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                    Box {
                         IconButton(onClick = { showSortMenu = true }) {
                             Icon(Icons.Default.Sort, contentDescription = "Sort")
                         }
@@ -171,6 +311,23 @@ fun SpoolsScreen(viewModel: SpoolmanViewModel) {
                                         if (sortBy == sort) sortAscending = !sortAscending
                                         else { sortBy = sort; sortAscending = true }
                                         prefs.edit().putString("spools_sort_by", sortBy.name).putBoolean("spools_sort_ascending", sortAscending).apply()
+                                        showSortMenu = false
+                                    }
+                                )
+                            }
+                            HorizontalDivider()
+                            Text("Group by", style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+                            SpoolGrouping.entries.forEach { grouping ->
+                                DropdownMenuItem(
+                                    text = { Text(grouping.label) },
+                                    trailingIcon = {
+                                        if (groupBy == grouping) Icon(Icons.Default.Check, contentDescription = null)
+                                    },
+                                    onClick = {
+                                        groupBy = grouping
+                                        prefs.edit().putString("spools_group_by", grouping.name).apply()
                                         showSortMenu = false
                                     }
                                 )
@@ -210,42 +367,80 @@ fun SpoolsScreen(viewModel: SpoolmanViewModel) {
                 }
             }
         } else {
-            LazyColumn(contentPadding = padding) {
-                viewModel.spoolsError?.let { error ->
-                    item {
-                        Row(
-                            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(Icons.Default.Warning, contentDescription = null,
-                                modifier = Modifier.size(16.dp), tint = Color(0xFFFF9500))
-                            Text("Couldn't refresh: $error", style = MaterialTheme.typography.bodySmall,
+            Column(Modifier.fillMaxSize().padding(padding)) {
+                OutlinedTextField(
+                    value = searchText,
+                    onValueChange = { searchText = it },
+                    placeholder = { Text("Name, material, #id, or tag UID") },
+                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                    trailingIcon = {
+                        if (searchText.isNotEmpty()) {
+                            IconButton(onClick = { searchText = "" }) {
+                                Icon(Icons.Default.Clear, contentDescription = "Clear search")
+                            }
+                        }
+                    },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
+                )
+                if (grouped.isEmpty() && !viewModel.hasMoreSpools) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Icon(Icons.Default.SearchOff, contentDescription = null,
+                                modifier = Modifier.size(48.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("No Matching Spools", style = MaterialTheme.typography.titleMedium)
+                            Text("No spools match the current search or filters.",
+                                style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            TextButton(onClick = {
+                                searchText = ""
+                                materialFilter = emptySet()
+                                tagFilter = SpoolTagFilter.ALL
+                            }) { Text("Clear Search & Filters") }
                         }
                     }
-                }
-                grouped.forEach { (header, spoolItems) ->
-                    stickyHeader {
-                        Surface(modifier = Modifier.fillMaxWidth()) {
-                            Text(header, style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp))
+                } else {
+                    LazyColumn(Modifier.fillMaxSize()) {
+                        viewModel.spoolsError?.let { error ->
+                            item {
+                                Row(
+                                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(Icons.Default.Warning, contentDescription = null,
+                                        modifier = Modifier.size(16.dp), tint = Color(0xFFFF9500))
+                                    Text("Couldn't refresh: $error", style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
                         }
-                    }
-                    items(spoolItems) { spool ->
-                        SpoolRow(spool = spool, onClick = { selectedSpool = spool },
-                            hasConflict = spool.tagUIDs.any { it in duplicateTagUIDs })
-                        HorizontalDivider(modifier = Modifier.padding(start = 72.dp))
-                    }
-                }
-                if (viewModel.hasMoreSpools) {
-                    item {
-                        Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
-                            if (viewModel.isFetchingSpools) CircularProgressIndicator()
-                            else TextButton(onClick = { viewModel.loadMoreSpools() }) { Text("Load More") }
+                        grouped.forEach { (header, spoolItems) ->
+                            if (header.isNotEmpty()) {
+                                stickyHeader {
+                                    Surface(modifier = Modifier.fillMaxWidth()) {
+                                        Text("$header (${spoolItems.size})", style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp))
+                                    }
+                                }
+                            }
+                            items(spoolItems, key = { it.id }) { spool ->
+                                SpoolRow(spool = spool, onClick = { selectedSpool = spool },
+                                    hasConflict = spool.tagUIDs.any { it in duplicateTagUIDs })
+                                HorizontalDivider(modifier = Modifier.padding(start = 72.dp))
+                            }
                         }
-                        LaunchedEffect(Unit) { viewModel.loadMoreSpools() }
+                        if (viewModel.hasMoreSpools) {
+                            item {
+                                Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
+                                    if (viewModel.isFetchingSpools) CircularProgressIndicator()
+                                    else TextButton(onClick = { viewModel.loadMoreSpools() }) { Text("Load More") }
+                                }
+                                LaunchedEffect(Unit) { viewModel.loadMoreSpools() }
+                            }
+                        }
                     }
                 }
             }

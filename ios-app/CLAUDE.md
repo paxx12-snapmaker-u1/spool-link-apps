@@ -124,6 +124,7 @@ Use `@AppStorage` in views for user preferences. Current keys:
 - `"filamentNameStyle"` — raw value of `FilamentNameStyle`
 - `"spoolsSortBy"` — raw value of `SpoolSort` (persisted in `SpoolsView`)
 - `"spoolsSortAscending"` — `Bool` sort direction (persisted in `SpoolsView`)
+- `"spoolsGroupBy"` — raw value of `SpoolGrouping` (persisted in `SpoolsView`)
 
 `FilamentPresets` are persisted via `FilamentPresets.load()` / `.save()` using `UserDefaults` directly
 (not `@AppStorage`).
