@@ -26,28 +26,35 @@ class SpoolmanApi(baseUrl: String) {
         .writeTimeout(REQUEST_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         .callTimeout(REQUEST_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         .build()
+    // Whole-collection fetches can exceed the 3s budget on a slow server or large inventory.
+    private val bulkHttpClient = httpClient.newBuilder()
+        .readTimeout(BULK_REQUEST_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .callTimeout(BULK_REQUEST_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .build()
     private var service: SpoolmanService = buildService(normalizedUrl)
+    private var bulkService: SpoolmanService = buildService(normalizedUrl, bulkHttpClient)
 
     fun updateBaseUrl(newUrl: String) {
         normalizedUrl = normalizeUrl(newUrl)
         service = buildService(normalizedUrl)
+        bulkService = buildService(normalizedUrl, bulkHttpClient)
     }
 
-    private fun buildService(url: String): SpoolmanService = Retrofit.Builder()
+    private fun buildService(url: String, client: OkHttpClient = httpClient): SpoolmanService = Retrofit.Builder()
         .baseUrl(url)
-        .client(httpClient)
+        .client(client)
         .addConverterFactory(GsonConverterFactory.create(gson))
         .build()
         .create(SpoolmanService::class.java)
 
     suspend fun fetchSpools(limit: Int = 20, offset: Int = 0): List<SpoolResponse> =
-        withContext(Dispatchers.IO) { service.fetchSpools(limit, offset) }
+        withContext(Dispatchers.IO) { bulkService.fetchSpools(limit, offset) }
 
     suspend fun getSpool(id: Int): SpoolResponse =
         withContext(Dispatchers.IO) { service.getSpool(id) }
 
     suspend fun findSpoolsByCardUid(uid: String): List<SpoolResponse> = withContext(Dispatchers.IO) {
-        val all = service.findSpoolsByCardUidCandidateSpools(limit = 1000, allowArchived = true)
+        val all = bulkService.findSpoolsByCardUidCandidateSpools(limit = 1000, allowArchived = true)
         all.filter { it.tagUIDs.contains(uid.uppercase()) }
     }
 
@@ -124,6 +131,7 @@ class SpoolmanApi(baseUrl: String) {
 
     companion object {
         const val REQUEST_TIMEOUT_SECONDS = 3L
+        const val BULK_REQUEST_TIMEOUT_SECONDS = 15L
 
         private val materialDensity = mapOf(
             "PLA" to 1.24, "PETG" to 1.27, "ABS" to 1.04, "ASA" to 1.07,

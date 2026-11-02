@@ -69,13 +69,17 @@ value itself is JSON-encoded (double-serialized string) as required by Spoolman'
 | `isLoadingFilaments` | `Bool` | Filament fetch in progress |
 | `filamentsErrorMessage` | `String?` | Last filament fetch error |
 
-Key methods: `ensureSpoolsLoaded()`, `fetchSpools(reset:)`, `loadMoreSpools()`, `processTag()`,
+Key methods: `ensureSpoolsLoaded()`, `fetchSpools(reset:)`, `loadSpools(reset:) async`,
+`refreshSpoolsIfStale(maxAge:)`, `loadMoreSpools()`, `processTag()`,
 `processAssignment()`, `startTagAssignment(for:)`, `cancelTagAssignment()`, `removeTag(uidHex:from:)`,
 `removeAllTags(from:)`, `createSpoolFromTag(tagPayload:uidHex:overrideMeta:selectedFilamentId:)`,
 `loadFilaments()`, `loadFilamentsIfNeeded()`, `updateBaseURL(_:)`.
 
 - `ensureSpoolsLoaded()` — call from any view that needs `viewModel.spools` populated. Fetches only when
   the list is currently empty.
+- `refreshSpoolsIfStale()` — call from screens that should show current data (Spools tab, assign sheet);
+  reloads unless the last successful load was under 15 s ago. `loadSpools` awaits an in-flight load
+  instead of starting a second one, and discards a response if `spools` was changed while it was in flight.
 - `processTag` and `processAssignment` own the "add to current spool, remove from others" sync logic.
   Do not duplicate this in views.
 

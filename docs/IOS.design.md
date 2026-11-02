@@ -172,7 +172,9 @@ Shown below the tag table when a Spoolman spool is associated:
 - Grouped by `SpoolSort` with section headers; sort persisted in `@AppStorage("spoolsSortBy")` /
   `@AppStorage("spoolsSortAscending")`
 - Sort options: Date Added, Last Used, Name, Material, Remaining, Tags
-- Pull-to-refresh + auto-triggered "Load More" row for pagination (page size 20)
+- Loads up to 1000 spools per request; auto-triggered "Load More" row only beyond that
+- Refreshes on appear and on returning to the foreground (skipped within 15 s of the last load);
+  pull-to-refresh; a failed refresh shows an inline "Couldn't refresh" banner above the list
 - Toolbar: refresh (leading, `arrow.clockwise`), sort menu (trailing, `arrow.up.arrow.down`)
 
 ### Spool Detail Sheet (`SpoolDetailSheet`)

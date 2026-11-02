@@ -17,9 +17,12 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import dev.pages.paxx12.spoollink.model.SpoolResponse
 import dev.pages.paxx12.spoollink.ui.components.*
 import dev.pages.paxx12.spoollink.viewmodel.SpoolmanViewModel
@@ -120,8 +123,16 @@ fun SpoolsScreen(viewModel: SpoolmanViewModel) {
         counts.filter { it.value > 1 }.keys.toSet()
     }
 
-    LaunchedEffect(Unit) {
-        if (viewModel.spools.isEmpty()) viewModel.fetchSpools()
+    // Runs on every tab selection, since MainScreen only composes the selected tab.
+    LaunchedEffect(Unit) { viewModel.refreshSpoolsIfStale() }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) viewModel.refreshSpoolsIfStale()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     Scaffold(
@@ -200,6 +211,20 @@ fun SpoolsScreen(viewModel: SpoolmanViewModel) {
             }
         } else {
             LazyColumn(contentPadding = padding) {
+                viewModel.spoolsError?.let { error ->
+                    item {
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Default.Warning, contentDescription = null,
+                                modifier = Modifier.size(16.dp), tint = Color(0xFFFF9500))
+                            Text("Couldn't refresh: $error", style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
                 grouped.forEach { (header, spoolItems) ->
                     stickyHeader {
                         Surface(modifier = Modifier.fillMaxWidth()) {

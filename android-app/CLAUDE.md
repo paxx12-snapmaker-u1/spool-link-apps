@@ -68,7 +68,8 @@ Bottom sheets use `ModalBottomSheet`. `SpoolDetailSheet` and `CreateSpoolSheet` 
 | `filamentsErrorMessage` | `String?` | Last filament fetch error |
 | `filamentPresets` | `FilamentPresets` | User-defined brand/material/variant/weight presets |
 
-Key ViewModel methods: `ensureSpoolsLoaded()`, `fetchSpools(reset)`, `loadMoreSpools()`, `processNfcTag()`,
+Key ViewModel methods: `ensureSpoolsLoaded()`, `fetchSpools(reset)`, `refreshSpoolsIfStale()` (reloads unless the
+last load was under 15 s ago; used by SpoolsScreen on tab selection and ON_RESUME), `loadMoreSpools()`, `processNfcTag()`,
 `processAssignment()`, `startTagAssignment(spool)`, `cancelTagAssignment()`, `removeTag(uidHex, spool)`,
 `removeAllTags(spool)`, `createSpoolFromTag()`, `loadFilaments()`, `loadFilamentsIfNeeded()`, `updatePresets(presets)`,
 `savedBaseUrl()`, `updateBaseUrl(url)`, `savedNameStyle()`, `saveNameStyle(style)`.

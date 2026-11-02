@@ -32,11 +32,14 @@ enum SpoolmanError: LocalizedError {
 
 actor SpoolmanAPI {
     private static let requestTimeout: TimeInterval = 3
+    private static let bulkRequestTimeout: TimeInterval = 15
 
     private var baseURL: String
     private let decoder: JSONDecoder
     private let encoder: JSONEncoder
     private let session: URLSession
+    // Whole-collection fetches can exceed the 3s budget on a slow server or large inventory.
+    private let bulkSession: URLSession
 
     init(baseURL: String) {
         self.baseURL = Self.normalizeURL(baseURL)
@@ -49,6 +52,10 @@ actor SpoolmanAPI {
         configuration.timeoutIntervalForRequest = Self.requestTimeout
         configuration.timeoutIntervalForResource = Self.requestTimeout
         self.session = URLSession(configuration: configuration)
+        let bulkConfiguration = URLSessionConfiguration.default
+        bulkConfiguration.timeoutIntervalForRequest = Self.bulkRequestTimeout
+        bulkConfiguration.timeoutIntervalForResource = Self.bulkRequestTimeout
+        self.bulkSession = URLSession(configuration: bulkConfiguration)
     }
 
     func updateBaseURL(_ newURL: String) {
@@ -195,7 +202,7 @@ actor SpoolmanAPI {
             URLQueryItem(name: "offset", value: "\(offset)"),
         ]
         guard let url = components.url else { throw SpoolmanError.invalidURL }
-        let (data, response) = try await session.data(from: url)
+        let (data, response) = try await bulkSession.data(from: url)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw SpoolmanError.serverError((response as? HTTPURLResponse)?.statusCode ?? -1)
         }
@@ -231,7 +238,7 @@ actor SpoolmanAPI {
             URLQueryItem(name: "allow_archived", value: "true"),
         ]
         guard let url = components.url else { throw SpoolmanError.invalidURL }
-        let (data, response) = try await session.data(from: url)
+        let (data, response) = try await bulkSession.data(from: url)
         guard let http = response as? HTTPURLResponse else {
             throw SpoolmanError.networkError(NSError(domain: "SpoolmanAPI", code: -1,
                 userInfo: [NSLocalizedDescriptionKey: "Invalid response"]))
