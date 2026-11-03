@@ -99,7 +99,7 @@ of uppercase hex UIDs:
 "AABBCCDD,11223344"
 ```
 
-`SpoolResponse.tagUIDs` parses out all entries. `tagCount` is `tagUIDs.size`. The field value itself is
+`SpoolResponse.tagUIDs` parses out all entries, uppercased (other clients may have written lowercase). `tagCount` is `tagUIDs.size`. The field value itself is
 JSON-encoded (double-serialized string) as required by Spoolman's custom field API.
 
 ## State in ViewModel

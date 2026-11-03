@@ -47,7 +47,7 @@ of uppercase hex UIDs:
 "AABBCCDD,11223344"
 ```
 
-`SpoolResponse.tagUIDs` splits on `,` and filters empty strings. `tagCount` is `tagUIDs.count`. The field
+`SpoolResponse.tagUIDs` splits on `,`, uppercases each UID (other clients may have written lowercase), and filters empty strings. `tagCount` is `tagUIDs.count`. The field
 value itself is JSON-encoded (double-serialized string) as required by Spoolman's custom field API —
 `SpoolmanAPI` handles this encoding/decoding transparently.
 
