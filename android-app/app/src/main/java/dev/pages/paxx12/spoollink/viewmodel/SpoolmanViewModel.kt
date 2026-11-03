@@ -8,6 +8,7 @@ import android.app.Application
 import android.content.Context
 import android.nfc.NdefMessage
 import android.nfc.Tag
+import android.os.SystemClock
 import androidx.compose.runtime.*
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -60,7 +61,12 @@ class SpoolmanViewModel(application: Application) : AndroidViewModel(application
     var filamentPresets by mutableStateOf(FilamentPresets.load(prefs))
 
     private var spoolsOffset = 0
-    private val spoolsPageSize = 20
+    // Large enough to load every spool at once so sorting and grouping see the whole collection;
+    // "Load More" only appears beyond this.
+    private val spoolsPageSize = 1000
+    private var lastSpoolsFetch: Long? = null
+    // Bumped whenever `spools` is changed outside a full load, so an in-flight load knows its response is stale.
+    private var spoolsGeneration = 0
 
     fun savedBaseUrl(): String = baseUrl
 
@@ -69,6 +75,12 @@ class SpoolmanViewModel(application: Application) : AndroidViewModel(application
         baseUrl = normalized
         prefs.edit().putString("base_url", normalized).apply()
         api.updateBaseUrl(normalized)
+        spoolsGeneration++
+        spools.clear()
+        spoolsOffset = 0
+        hasMoreSpools = false
+        spoolsError = null
+        lastSpoolsFetch = null
     }
 
     fun savedNameStyle(): FilamentNameStyle =
@@ -93,26 +105,40 @@ class SpoolmanViewModel(application: Application) : AndroidViewModel(application
         if (spools.isEmpty() && !isFetchingSpools) fetchSpools()
     }
 
+    /**
+     * Reloads unless the last successful load is recent; called on every tab selection and resume, so this
+     * avoids refetching the whole collection each time.
+     */
+    fun refreshSpoolsIfStale(maxAgeMs: Long = 15_000) {
+        val last = lastSpoolsFetch
+        if (last != null && SystemClock.elapsedRealtime() - last < maxAgeMs) return
+        fetchSpools(reset = true)
+    }
+
     fun fetchSpools(reset: Boolean = true) {
         if (isFetchingSpools) return
-        val offset = if (reset) 0 else spoolsOffset
         isFetchingSpools = true
         viewModelScope.launch {
-            try {
-                spoolsError = null
-                val page = api.fetchSpools(limit = spoolsPageSize, offset = offset)
-                val active = page.filter { !it.archived }
-                if (reset) {
-                    spools.clear()
+            // Retry if `spools` changed mid-fetch (tag assigned, server switched); applying the older response would undo it.
+            for (attempt in 0 until 3) {
+                val generation = spoolsGeneration
+                val offset = if (reset) 0 else spoolsOffset
+                try {
+                    val page = api.fetchSpools(limit = spoolsPageSize, offset = offset)
+                    if (generation != spoolsGeneration) continue
+                    val active = page.filter { !it.archived }
+                    if (reset) spools.clear()
                     spools.addAll(active)
-                } else {
-                    spools.addAll(active)
+                    spoolsOffset = offset + page.size
+                    hasMoreSpools = page.size == spoolsPageSize
+                    spoolsError = null
+                    lastSpoolsFetch = SystemClock.elapsedRealtime()
+                } catch (e: Exception) {
+                    if (generation != spoolsGeneration) continue
+                    spoolsError = e.message ?: "Unable to load spools"
+                    if (spools.isEmpty()) hasMoreSpools = false
                 }
-                spoolsOffset = offset + page.size
-                hasMoreSpools = page.size == spoolsPageSize
-            } catch (e: Exception) {
-                spoolsError = e.message ?: "Unable to load spools"
-                hasMoreSpools = false
+                break
             }
             isFetchingSpools = false
         }
@@ -124,6 +150,7 @@ class SpoolmanViewModel(application: Application) : AndroidViewModel(application
 
     suspend fun refreshSpool(id: Int): SpoolResponse? {
         val updated = try { api.getSpool(id) } catch (_: Exception) { return null }
+        spoolsGeneration++
         val idx = spools.indexOfFirst { it.id == id }
         if (idx >= 0) spools[idx] = updated
         for (i in 0 until scanHistory.size) {

@@ -92,7 +92,12 @@ When `viewModel.pendingAssignSpool != null`, `MainScreen` renders a full-screen 
 - Grouped `LazyColumn` with `stickyHeader` section labels.
 - Sort options (same 6 as iOS) stored in `SharedPreferences("spoolman_prefs")` keys `spools_sort_by` /
   `spools_sort_ascending`.
-- Sort menu: `DropdownMenu` with up/down arrow icon on active sort.
+- Sort menu: `DropdownMenu` with up/down arrow icon on active sort, then a "Group by" section
+  (`SpoolGrouping`: Match Sort (default), None, Material, Vendor, Tags) stored in `spools_group_by`.
+  Section headers show item counts.
+- Search `OutlinedTextField` above the list: name/vendor, material, lot number, `#id` (exact), tag UID.
+- Filter menu (`FilterList` icon, tinted primary when active): tag status and multi-select material
+  (case-insensitive). No matches shows "No Matching Spools" with "Clear Search & Filters".
 - 44 dp `ColorSwatch` per row, `cornerRadius = 10 dp`; material capsule, `#id`, remaining weight, `TagCountBadge`.
 - Conflict indicator: `Icons.Default.Warning` in orange.
 - `SpoolDetailSheet` via `AdaptiveModal`.

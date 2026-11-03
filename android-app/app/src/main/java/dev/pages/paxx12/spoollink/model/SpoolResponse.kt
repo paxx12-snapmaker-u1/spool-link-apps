@@ -13,7 +13,8 @@ data class SpoolResponse(
     val archived: Boolean = false,
     val registered: String?,
     @SerializedName("last_used") val lastUsed: String?,
-    val extra: ExtraData?
+    val extra: ExtraData?,
+    @SerializedName("lot_nr") val lotNr: String? = null
 ) {
     data class FilamentResponse(
         val id: Int = 0,

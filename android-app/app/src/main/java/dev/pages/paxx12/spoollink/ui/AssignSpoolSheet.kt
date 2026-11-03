@@ -46,9 +46,7 @@ fun AssignSpoolSheet(
         }
     }
 
-    LaunchedEffect(Unit) {
-        if (viewModel.spools.isEmpty()) viewModel.fetchSpools()
-    }
+    LaunchedEffect(Unit) { viewModel.refreshSpoolsIfStale() }
 
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(onDismissRequest = { if (!isAssigning) onDismiss() },

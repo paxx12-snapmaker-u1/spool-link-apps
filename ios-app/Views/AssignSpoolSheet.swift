@@ -101,8 +101,6 @@ struct AssignSpoolSheet: View {
                 }
             }
         }
-        .onAppear {
-            if viewModel.spools.isEmpty { viewModel.fetchSpools() }
-        }
+        .onAppear { viewModel.refreshSpoolsIfStale() }
     }
 }

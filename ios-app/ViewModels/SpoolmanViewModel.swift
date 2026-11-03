@@ -21,7 +21,13 @@ class SpoolmanViewModel: NFCManagerDelegate {
     var isLoadingFilaments = false
     var filamentsErrorMessage: String?
     private var spoolsOffset = 0
-    private let spoolsPageSize = 20
+    // Large enough to load every spool at once so sort, grouping, search, and filter see the whole collection;
+    // "Load More" only appears beyond this.
+    private let spoolsPageSize = 1000
+    private var lastSpoolsFetch: Date?
+    private var spoolsLoadTask: Task<Void, Never>?
+    // Bumped whenever `spools` is changed outside a full load, so an in-flight load knows its response is stale.
+    private var spoolsGeneration = 0
 
     private let api: SpoolmanAPI
     let nfcManager: NFCManager
@@ -33,7 +39,15 @@ class SpoolmanViewModel: NFCManagerDelegate {
     }
 
     func updateBaseURL(_ url: String) {
-        Task { await api.updateBaseURL(url) }
+        Task { @MainActor in
+            await api.updateBaseURL(url)
+            spoolsGeneration += 1
+            spools = []
+            spoolsOffset = 0
+            hasMoreSpools = false
+            spoolsErrorMessage = nil
+            lastSpoolsFetch = nil
+        }
     }
 
     // MARK: - Spool list
@@ -46,13 +60,41 @@ class SpoolmanViewModel: NFCManagerDelegate {
 
     @MainActor
     func fetchSpools(reset: Bool = true) {
-        guard !isFetchingSpools else { return }
-        let offset = reset ? 0 : spoolsOffset
+        Task { await loadSpools(reset: reset) }
+    }
+
+    /// Reloads unless the last successful load is recent; called on every appearance, so this avoids refetching
+    /// the whole collection on each tab switch.
+    @MainActor
+    func refreshSpoolsIfStale(maxAge: TimeInterval = 15) {
+        if let last = lastSpoolsFetch, Date().timeIntervalSince(last) < maxAge { return }
+        fetchSpools(reset: true)
+    }
+
+    /// Loads spools, or waits for the load already in progress.
+    @MainActor
+    func loadSpools(reset: Bool = true) async {
+        if let inFlight = spoolsLoadTask {
+            await inFlight.value
+            return
+        }
+        let task = Task { await performSpoolsLoad(reset: reset) }
+        spoolsLoadTask = task
+        await task.value
+        spoolsLoadTask = nil
+    }
+
+    @MainActor
+    private func performSpoolsLoad(reset: Bool) async {
         isFetchingSpools = true
-        spoolsErrorMessage = nil
-        Task {
+        defer { isFetchingSpools = false }
+        // Retry if `spools` changed mid-fetch (tag assigned, server switched); applying the older response would undo it.
+        for _ in 0..<3 {
+            let generation = spoolsGeneration
+            let offset = reset ? 0 : spoolsOffset
             do {
                 let page = try await api.fetchSpools(limit: spoolsPageSize, offset: offset)
+                guard generation == spoolsGeneration else { continue }
                 let active = page.filter { !$0.archived }
                 if reset {
                     spools = active
@@ -61,11 +103,15 @@ class SpoolmanViewModel: NFCManagerDelegate {
                 }
                 spoolsOffset = offset + page.count
                 hasMoreSpools = page.count == spoolsPageSize
+                spoolsErrorMessage = nil
+                lastSpoolsFetch = Date()
+                return
             } catch {
+                guard generation == spoolsGeneration else { continue }
                 spoolsErrorMessage = error.localizedDescription
-                hasMoreSpools = false
+                if spools.isEmpty { hasMoreSpools = false }
+                return
             }
-            isFetchingSpools = false
         }
     }
 
@@ -79,6 +125,7 @@ class SpoolmanViewModel: NFCManagerDelegate {
     @discardableResult
     func refreshSpool(id: Int) async -> SpoolResponse? {
         guard let updated = try? await api.getSpool(id: id) else { return nil }
+        spoolsGeneration += 1
         if let idx = spools.firstIndex(where: { $0.id == id }) {
             spools[idx] = updated
         }
