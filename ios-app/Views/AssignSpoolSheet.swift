@@ -39,10 +39,12 @@ struct AssignSpoolSheet: View {
                         Button {
                             Task {
                                 isAssigning = true
-                                await viewModel.processAssignment(
-                                    spool: spool, uidHex: uidHex, tagPayload: tagPayload)
+                                // No move confirmation: the scan result already showed which spool the tag is on.
+                                let outcome = await viewModel.processAssignment(
+                                    spool: spool, uidHex: uidHex, tagPayload: tagPayload, confirmMove: false)
                                 isAssigning = false
-                                dismiss()
+                                // Otherwise stay open: an error is showing, and the user may pick another spool.
+                                if outcome == .assigned || outcome == .moved { dismiss() }
                             }
                         } label: {
                             HStack(spacing: 12) {
@@ -86,6 +88,7 @@ struct AssignSpoolSheet: View {
             .searchable(text: $searchText, prompt: "Search spools")
             .navigationTitle("Assign to Spool")
             .navigationBarTitleDisplayMode(.inline)
+            .modifier(TagAssignmentPrompts(viewModel: viewModel))
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Cancel") { dismiss() }

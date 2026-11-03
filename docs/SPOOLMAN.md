@@ -194,6 +194,16 @@ When an NFC tag is scanned or assigned to a spool:
    (`limit=1000&allow_archived=true`) and filtering client-side on `tagUIDs`.
 5. **Remove** the UID from each other spool's `card_uids` and write back via `PATCH`.
 
+When the user assigns a tag manually, the apps check before writing:
+
+- If the UID is on any **other** spool and the user chose the spool before scanning (Assign NFC Tag
+  on a spool), nothing is written until the user confirms the move. On confirmation, steps 1–5 run;
+  on cancel, no spool changes. When the user picks a spool for an already-scanned tag (Change
+  Spool), the scan result has already shown where the tag is, so it moves without a prompt.
+- Otherwise, if the target spool already has the UID, the assignment is rejected with an error.
+
+Tags whose NDEF data names their own `spool_id` (OpenSpool) are synced without confirmation.
+
 ---
 
 ## `variant` Custom Field (Filament)

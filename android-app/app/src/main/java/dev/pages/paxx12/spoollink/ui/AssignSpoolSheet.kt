@@ -23,6 +23,7 @@ import dev.pages.paxx12.spoollink.model.SpoolResponse
 import dev.pages.paxx12.spoollink.ui.components.ColorSwatch
 import dev.pages.paxx12.spoollink.ui.components.TagCountBadge
 import dev.pages.paxx12.spoollink.viewmodel.SpoolmanViewModel
+import dev.pages.paxx12.spoollink.viewmodel.TagAssignmentOutcome
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -49,6 +50,8 @@ fun AssignSpoolSheet(
     LaunchedEffect(Unit) {
         if (viewModel.spools.isEmpty()) viewModel.fetchSpools()
     }
+
+    TagAssignmentPrompts(viewModel)
 
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(onDismissRequest = { if (!isAssigning) onDismiss() },
@@ -90,9 +93,11 @@ fun AssignSpoolSheet(
                             modifier = Modifier.fillMaxWidth().clickable(enabled = !isAssigning) {
                                 scope.launch {
                                     isAssigning = true
-                                    viewModel.processAssignment(spool, uidHex, tagPayload)
+                                    // No move confirmation: the scan result already showed which spool the tag is on.
+                                    val outcome = viewModel.processAssignment(spool, uidHex, tagPayload, confirmMove = false)
                                     isAssigning = false
-                                    onDismiss()
+                                    // Otherwise stay open: an error is showing, and the user may pick another spool.
+                                    if (outcome == TagAssignmentOutcome.ASSIGNED || outcome == TagAssignmentOutcome.MOVED) onDismiss()
                                 }
                             }.padding(horizontal = 16.dp, vertical = 12.dp),
                             horizontalArrangement = Arrangement.spacedBy(12.dp),

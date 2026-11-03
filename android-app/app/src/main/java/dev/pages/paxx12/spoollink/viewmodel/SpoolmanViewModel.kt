@@ -41,6 +41,15 @@ class SpoolmanViewModel(application: Application) : AndroidViewModel(application
     val scanHistory = mutableStateListOf<ScanResult>()
     var lastResult by mutableStateOf<ScanResult?>(null)
         private set
+    /** Outcome of the most recent tag assignment, shown where it was started. */
+    var lastAssignmentResult by mutableStateOf<ScanResult?>(null)
+        private set
+    /** Set when an assignment would take a tag from another spool; the UI must confirm or decline it. */
+    var pendingTagMove by mutableStateOf<PendingTagMove?>(null)
+        private set
+    /** An assignment error to present as a dialog. */
+    var assignmentError by mutableStateOf<TagAssignmentError?>(null)
+        private set
     val spools = mutableStateListOf<SpoolResponse>()
     var isFetchingSpools by mutableStateOf(false)
         private set
@@ -136,7 +145,9 @@ class SpoolmanViewModel(application: Application) : AndroidViewModel(application
     fun removeTag(uidHex: String, spool: SpoolResponse) {
         viewModelScope.launch {
             try {
-                val updatedUIDs = spool.tagUIDs.filter { it.uppercase() != uidHex.uppercase() }
+                // The caller's spool may be a stale snapshot; filtering it would drop tags assigned since.
+                val currentUIDs = runCatching { api.getSpool(spool.id).tagUIDs }.getOrDefault(spool.tagUIDs)
+                val updatedUIDs = currentUIDs.filter { it.uppercase() != uidHex.uppercase() }
                 api.updateSpoolCardUids(spool.id, updatedUIDs)
                 refreshSpool(spool.id)
                 if (lastResult?.spoolId == spool.id) {
@@ -189,6 +200,7 @@ class SpoolmanViewModel(application: Application) : AndroidViewModel(application
     fun startTagAssignment(spool: SpoolResponse) {
         pendingAssignSpool = spool
         lastResult = null
+        lastAssignmentResult = null
         isScanning = true
         statusMessage = "Scan tag to assign to ${spool.displayName}…"
     }
@@ -352,39 +364,125 @@ class SpoolmanViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    suspend fun processAssignment(spool: SpoolResponse, uidHex: String, tagPayload: NFCTagPayload) {
+    /**
+     * Assigns a scanned tag to [spool]. Rejects a tag the spool already has. Before taking a tag away from
+     * another spool it asks for confirmation (via [pendingTagMove]), unless [confirmMove] is false because the
+     * user already saw where the tag was when choosing the spool.
+     */
+    suspend fun processAssignment(
+        spool: SpoolResponse,
+        uidHex: String,
+        tagPayload: NFCTagPayload,
+        confirmMove: Boolean = true
+    ): TagAssignmentOutcome {
         statusMessage = "Assigning tag to ${spool.displayName}…"
-        try {
-            val currentUIDs = spool.tagUIDs
-            val updatedUIDs = if (currentUIDs.contains(uidHex)) currentUIDs else currentUIDs + uidHex
-            api.updateSpoolCardUids(spool.id, updatedUIDs)
-
-            val matching = api.findSpoolsByCardUid(uidHex)
-            for (other in matching) {
-                if (other.id == spool.id) continue
-                val cleaned = other.tagUIDs.filter { it != uidHex }
-                if (cleaned.size != other.tagUIDs.size) {
-                    api.updateSpoolCardUids(other.id, cleaned)
-                    refreshSpool(other.id)
+        return try {
+            // The caller's spool may be a stale snapshot; building on it would drop tags assigned since.
+            val freshSpool = api.getSpool(spool.id)
+            val otherOwners = api.findSpoolsByCardUid(uidHex).filter { it.id != spool.id }
+            when {
+                otherOwners.isNotEmpty() && !confirmMove ->
+                    confirmTagMove(PendingTagMove(freshSpool, uidHex, tagPayload, otherOwners))
+                otherOwners.isNotEmpty() -> {
+                    pendingTagMove = PendingTagMove(freshSpool, uidHex, tagPayload, otherOwners)
+                    statusMessage = "Confirm moving tag to ${spool.displayName}"
+                    TagAssignmentOutcome.NEEDS_CONFIRMATION
+                }
+                freshSpool.tagUIDs.contains(uidHex) -> {
+                    recordAssignmentFailure(freshSpool, uidHex, tagPayload, "Tag Already Assigned",
+                        "This tag is already assigned to ${spool.displayName} (#${spool.id}).")
+                    TagAssignmentOutcome.ALREADY_ASSIGNED
+                }
+                else -> {
+                    api.updateSpoolCardUids(spool.id, freshSpool.tagUIDs + uidHex)
+                    recordAssignmentSuccess(freshSpool, uidHex, tagPayload, "Tag assigned")
+                    TagAssignmentOutcome.ASSIGNED
                 }
             }
-
-            val updatedSpool = refreshSpool(spool.id) ?: spool
-            statusMessage = "Tag assigned to ${spool.displayName}"
-            val result = ScanResult(
-                spoolId = spool.id,
-                spoolName = spool.displayName,
-                cardUid = uidHex,
-                success = true,
-                message = "Tag assigned",
-                tagPayload = tagPayload,
-                spoolResponse = updatedSpool
-            )
-            scanHistory.add(0, result)
-            lastResult = result
         } catch (e: Exception) {
-            statusMessage = "Error: ${e.message}"
+            recordAssignmentFailure(spool, uidHex, tagPayload, "Couldn't Assign Tag", e.message ?: "Unknown error")
+            TagAssignmentOutcome.FAILED
         }
+    }
+
+    /** Completes a move the user confirmed: adds the tag to the target spool and removes it from all others. */
+    suspend fun confirmTagMove(move: PendingTagMove): TagAssignmentOutcome {
+        if (pendingTagMove?.id == move.id) pendingTagMove = null
+        statusMessage = "Moving tag to ${move.spool.displayName}…"
+        return try {
+            // Re-read both sides: the confirmation may have been open for a while.
+            val target = api.getSpool(move.spool.id)
+            if (!target.tagUIDs.contains(move.uidHex)) {
+                api.updateSpoolCardUids(target.id, target.tagUIDs + move.uidHex)
+            }
+            for (other in api.findSpoolsByCardUid(move.uidHex)) {
+                if (other.id == target.id) continue
+                api.updateSpoolCardUids(other.id, other.tagUIDs.filter { it != move.uidHex })
+                refreshSpool(other.id)
+            }
+            recordAssignmentSuccess(target, move.uidHex, move.tagPayload, "Tag moved from ${move.ownersDescription}")
+            TagAssignmentOutcome.MOVED
+        } catch (e: Exception) {
+            recordAssignmentFailure(move.spool, move.uidHex, move.tagPayload, "Couldn't Move Tag",
+                e.message ?: "Unknown error")
+            TagAssignmentOutcome.FAILED
+        }
+    }
+
+    /** The user declined the move; nothing was written. */
+    fun declineTagMove() {
+        val move = pendingTagMove ?: return
+        pendingTagMove = null
+        statusMessage = "Tag not moved"
+        lastAssignmentResult = ScanResult(
+            spoolId = move.spool.id,
+            spoolName = move.spool.displayName,
+            cardUid = move.uidHex,
+            success = false,
+            message = "Tag not moved — still on ${move.ownersDescription}",
+            tagPayload = move.tagPayload,
+            spoolResponse = move.spool
+        )
+    }
+
+    fun dismissAssignmentError() {
+        assignmentError = null
+    }
+
+    private suspend fun recordAssignmentSuccess(spool: SpoolResponse, uidHex: String, tagPayload: NFCTagPayload,
+                                                message: String) {
+        val updatedSpool = refreshSpool(spool.id) ?: spool
+        statusMessage = "$message — ${spool.displayName}"
+        val result = ScanResult(
+            spoolId = spool.id,
+            spoolName = spool.displayName,
+            cardUid = uidHex,
+            success = true,
+            message = message,
+            tagPayload = tagPayload,
+            spoolResponse = updatedSpool
+        )
+        scanHistory.add(0, result)
+        lastResult = result
+        lastAssignmentResult = result
+    }
+
+    private fun recordAssignmentFailure(spool: SpoolResponse, uidHex: String, tagPayload: NFCTagPayload,
+                                        title: String, message: String) {
+        statusMessage = "$title: $message"
+        val result = ScanResult(
+            spoolId = spool.id,
+            spoolName = spool.displayName,
+            cardUid = uidHex,
+            success = false,
+            message = title,
+            tagPayload = tagPayload,
+            spoolResponse = spool
+        )
+        scanHistory.add(0, result)
+        lastResult = result
+        lastAssignmentResult = result
+        assignmentError = TagAssignmentError(title, message)
     }
 
     fun loadFilamentsIfNeeded() {
@@ -472,3 +570,20 @@ class SpoolmanViewModel(application: Application) : AndroidViewModel(application
         isCreatingSpool = false
     }
 }
+
+/** Lets the caller decide what to do next, e.g. close the picker once the tag is assigned or moved. */
+enum class TagAssignmentOutcome { ASSIGNED, MOVED, ALREADY_ASSIGNED, NEEDS_CONFIRMATION, FAILED }
+
+/** A scanned tag that belongs to other spools, awaiting the user's OK to move it to [spool]. */
+data class PendingTagMove(
+    val spool: SpoolResponse,
+    val uidHex: String,
+    val tagPayload: NFCTagPayload,
+    val currentOwners: List<SpoolResponse>,
+    val id: String = java.util.UUID.randomUUID().toString()
+) {
+    val ownersDescription: String
+        get() = currentOwners.joinToString(", ") { "${it.displayName} (#${it.id})" }
+}
+
+data class TagAssignmentError(val title: String, val message: String)

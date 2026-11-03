@@ -51,6 +51,11 @@ All implementations must strictly adhere to this synchronization logic:
 4. **Cleanup Others**: Search the Spoolman server for any other spools containing this UID in their
    `extra.card_uids` and remove only that UID from them.
 
+For manual assignment, moving a UID off another spool requires the user's confirmation when they chose the
+spool before scanning (Assign NFC Tag); picking a spool for an already-scanned tag moves it directly. Assigning
+a UID the spool already has is reported as an error. See
+[docs/SPOOLMAN.md](./docs/SPOOLMAN.md#sync-logic-add-to-current-remove-from-others).
+
 The `card_uids` custom field must exist before writing; call `ensureCardUidsField()` (or equivalent) on first use.
 
 ## Agent Workflow

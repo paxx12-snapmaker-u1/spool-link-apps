@@ -22,7 +22,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import dev.pages.paxx12.spoollink.model.SpoolResponse
 import dev.pages.paxx12.spoollink.ui.components.*
+import dev.pages.paxx12.spoollink.viewmodel.PendingTagMove
 import dev.pages.paxx12.spoollink.viewmodel.SpoolmanViewModel
+import kotlinx.coroutines.launch
 import java.util.Calendar
 import java.util.Date
 
@@ -461,6 +463,20 @@ fun SpoolDetailSheet(
                                 modifier = Modifier.padding(vertical = 4.dp))
                         }
                     }
+                    val assignment = viewModel.lastAssignmentResult
+                    if (!isAssigning && assignment != null && assignment.spoolId == currentSpool.id) {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            val color = if (assignment.success) Color(0xFF34C759) else MaterialTheme.colorScheme.error
+                            Icon(if (assignment.success) Icons.Default.CheckCircle else Icons.Default.Cancel,
+                                contentDescription = null, tint = color, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(assignment.message, color = color, style = MaterialTheme.typography.bodyMedium)
+                        }
+                    }
                     OutlinedButton(
                         onClick = { uriHandler.openUri(spoolWebUrl) },
                         modifier = Modifier.fillMaxWidth(),
@@ -476,6 +492,8 @@ fun SpoolDetailSheet(
             item { Spacer(Modifier.height(16.dp)) }
         }
     }
+
+    TagAssignmentPrompts(viewModel, owns = { it.spool.id == spool.id })
 
     if (showRemoveConfirm) {
         AlertDialog(
@@ -512,5 +530,43 @@ private fun DetailInfoRow(label: String, content: @Composable () -> Unit) {
         Text(label, style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.width(80.dp))
         content()
+    }
+}
+
+/** Move-tag confirmation and assignment error dialogs for screens that start tag assignments. */
+@Composable
+fun TagAssignmentPrompts(
+    viewModel: SpoolmanViewModel,
+    // Whether a pending move belongs to this screen; the default is for screens that never ask to confirm a move.
+    owns: (PendingTagMove) -> Boolean = { false }
+) {
+    val scope = rememberCoroutineScope()
+    viewModel.pendingTagMove?.takeIf(owns)?.let { move ->
+        AlertDialog(
+            onDismissRequest = { viewModel.declineTagMove() },
+            title = { Text("Move Tag?") },
+            text = {
+                Text("This tag is assigned to ${move.ownersDescription}. " +
+                    "Move it to ${move.spool.displayName} (#${move.spool.id})?")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    scope.launch { viewModel.confirmTagMove(move) }
+                }) { Text("Move Tag") }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.declineTagMove() }) { Text("Cancel") }
+            }
+        )
+    }
+    viewModel.assignmentError?.let { error ->
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissAssignmentError() },
+            title = { Text(error.title) },
+            text = { Text(error.message) },
+            confirmButton = {
+                TextButton(onClick = { viewModel.dismissAssignmentError() }) { Text("OK") }
+            }
+        )
     }
 }

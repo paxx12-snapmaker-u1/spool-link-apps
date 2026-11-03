@@ -16,6 +16,12 @@ class SpoolmanViewModel: NFCManagerDelegate {
     var spoolsErrorMessage: String?
     var hasMoreSpools = false
     var pendingAssignSpool: SpoolResponse?
+    /// Outcome of the most recent tag assignment, shown where it was started.
+    var lastAssignmentResult: ScanResult?
+    /// Set when an assignment would take a tag from another spool; the UI must confirm or decline it.
+    var pendingTagMove: PendingTagMove?
+    /// An assignment error to present as an alert.
+    var assignmentError: TagAssignmentError?
     var isCreatingSpool = false
     var availableFilaments: [SpoolmanAPI.FilamentResponse] = []
     var isLoadingFilaments = false
@@ -111,7 +117,9 @@ class SpoolmanViewModel: NFCManagerDelegate {
 
     @MainActor
     func removeTag(uidHex: String, from spool: SpoolResponse) async {
-        let updatedUIDs = spool.tagUIDs.filter { $0.uppercased() != uidHex.uppercased() }
+        // The caller's spool may be a stale snapshot; filtering it would drop tags assigned since.
+        let currentUIDs = (try? await api.getSpool(id: spool.id))?.tagUIDs ?? spool.tagUIDs
+        let updatedUIDs = currentUIDs.filter { $0.uppercased() != uidHex.uppercased() }
         try? await api.updateSpoolCardUids(id: spool.id, uids: updatedUIDs)
         await refreshSpool(id: spool.id)
         if let result = lastResult, result.spoolId == spool.id {
@@ -231,6 +239,7 @@ class SpoolmanViewModel: NFCManagerDelegate {
     func startTagAssignment(for spool: SpoolResponse) {
         pendingAssignSpool = spool
         lastResult = nil
+        lastAssignmentResult = nil
         nfcManager.startScanning()
         isScanning = nfcManager.isScanning
         statusMessage = "Scan tag to assign to \(spool.displayName)…"
@@ -341,40 +350,148 @@ class SpoolmanViewModel: NFCManagerDelegate {
         }
     }
 
+    /// Assigns a scanned tag to `spool`. Rejects a tag the spool already has. Before taking a tag away from
+    /// another spool it asks for confirmation (via `pendingTagMove`), unless `confirmMove` is false because the
+    /// user already saw where the tag was when choosing the spool.
     @MainActor
-    func processAssignment(spool: SpoolResponse, uidHex: String, tagPayload: any NFCTagPayload) async {
+    @discardableResult
+    func processAssignment(spool: SpoolResponse, uidHex: String, tagPayload: any NFCTagPayload,
+                           confirmMove: Bool = true) async -> TagAssignmentOutcome {
         statusMessage = "Assigning tag to \(spool.displayName)…"
 
         do {
-            let currentUIDs = spool.tagUIDs
-            let updatedUIDs = currentUIDs.contains(uidHex) ? currentUIDs : currentUIDs + [uidHex]
-            try await api.updateSpoolCardUids(id: spool.id, uids: updatedUIDs)
+            // The caller's spool may be a stale snapshot; building on it would drop tags assigned since.
+            let freshSpool = try await api.getSpool(id: spool.id)
+            let otherOwners = try await api.findSpoolsByCardUid(uidHex).filter { $0.id != spool.id }
 
-            let matchingSpools = try await api.findSpoolsByCardUid(uidHex)
-            for otherSpool in matchingSpools where otherSpool.id != spool.id {
-                let cleaned = otherSpool.tagUIDs.filter { $0 != uidHex }
-                if cleaned.count != otherSpool.tagUIDs.count {
-                    try await api.updateSpoolCardUids(id: otherSpool.id, uids: cleaned)
-                    await refreshSpool(id: otherSpool.id)
-                }
+            if !otherOwners.isEmpty {
+                let move = PendingTagMove(spool: freshSpool, uidHex: uidHex, tagPayload: tagPayload,
+                                          currentOwners: otherOwners)
+                guard confirmMove else { return await confirmTagMove(move) }
+                pendingTagMove = move
+                statusMessage = "Confirm moving tag to \(spool.displayName)"
+                return .needsConfirmation
             }
 
-            let updatedSpool = await refreshSpool(id: spool.id) ?? spool
-            statusMessage = "Tag assigned to \(spool.displayName)"
-            let result = ScanResult(
-                spoolId: spool.id,
-                spoolName: spool.displayName,
-                cardUid: uidHex,
-                success: true,
-                message: "Tag assigned",
-                tagPayload: tagPayload,
-                spoolResponse: updatedSpool
-            )
-            scanHistory.insert(result, at: 0)
-            lastResult = result
+            if freshSpool.tagUIDs.contains(uidHex) {
+                recordAssignmentFailure(spool: freshSpool, uidHex: uidHex, tagPayload: tagPayload,
+                                        title: "Tag Already Assigned",
+                                        message: "This tag is already assigned to \(spool.displayName) (#\(spool.id)).")
+                return .alreadyAssigned
+            }
 
+            try await api.updateSpoolCardUids(id: spool.id, uids: freshSpool.tagUIDs + [uidHex])
+            await recordAssignmentSuccess(spool: freshSpool, uidHex: uidHex, tagPayload: tagPayload, message: "Tag assigned")
+            return .assigned
         } catch {
-            statusMessage = "Error: \(error.localizedDescription)"
+            recordAssignmentFailure(spool: spool, uidHex: uidHex, tagPayload: tagPayload,
+                                    title: "Couldn't Assign Tag", message: error.localizedDescription)
+            return .failed
         }
     }
+
+    /// Completes a move the user confirmed: adds the tag to the target spool and removes it from all others.
+    @MainActor
+    @discardableResult
+    func confirmTagMove(_ move: PendingTagMove) async -> TagAssignmentOutcome {
+        if pendingTagMove?.id == move.id { pendingTagMove = nil }
+        statusMessage = "Moving tag to \(move.spool.displayName)…"
+        do {
+            // Re-read both sides: the confirmation may have been open for a while.
+            let target = try await api.getSpool(id: move.spool.id)
+            if !target.tagUIDs.contains(move.uidHex) {
+                try await api.updateSpoolCardUids(id: target.id, uids: target.tagUIDs + [move.uidHex])
+            }
+            for other in try await api.findSpoolsByCardUid(move.uidHex) where other.id != target.id {
+                try await api.updateSpoolCardUids(id: other.id, uids: other.tagUIDs.filter { $0 != move.uidHex })
+                await refreshSpool(id: other.id)
+            }
+            await recordAssignmentSuccess(spool: target, uidHex: move.uidHex, tagPayload: move.tagPayload,
+                                          message: "Tag moved from \(move.ownersDescription)")
+            return .moved
+        } catch {
+            recordAssignmentFailure(spool: move.spool, uidHex: move.uidHex, tagPayload: move.tagPayload,
+                                    title: "Couldn't Move Tag", message: error.localizedDescription)
+            return .failed
+        }
+    }
+
+    /// The user declined the move; nothing was written.
+    @MainActor
+    func declineTagMove() {
+        guard let move = pendingTagMove else { return }
+        pendingTagMove = nil
+        statusMessage = "Tag not moved"
+        lastAssignmentResult = ScanResult(
+            spoolId: move.spool.id,
+            spoolName: move.spool.displayName,
+            cardUid: move.uidHex,
+            success: false,
+            message: "Tag not moved — still on \(move.ownersDescription)",
+            tagPayload: move.tagPayload,
+            spoolResponse: move.spool
+        )
+    }
+
+    @MainActor
+    private func recordAssignmentSuccess(spool: SpoolResponse, uidHex: String, tagPayload: any NFCTagPayload,
+                                         message: String) async {
+        let updatedSpool = await refreshSpool(id: spool.id) ?? spool
+        statusMessage = "\(message) — \(spool.displayName)"
+        let result = ScanResult(
+            spoolId: spool.id,
+            spoolName: spool.displayName,
+            cardUid: uidHex,
+            success: true,
+            message: message,
+            tagPayload: tagPayload,
+            spoolResponse: updatedSpool
+        )
+        scanHistory.insert(result, at: 0)
+        lastResult = result
+        lastAssignmentResult = result
+    }
+
+    @MainActor
+    private func recordAssignmentFailure(spool: SpoolResponse, uidHex: String, tagPayload: any NFCTagPayload,
+                                         title: String, message: String) {
+        statusMessage = "\(title): \(message)"
+        let result = ScanResult(
+            spoolId: spool.id,
+            spoolName: spool.displayName,
+            cardUid: uidHex,
+            success: false,
+            message: title,
+            tagPayload: tagPayload,
+            spoolResponse: spool
+        )
+        scanHistory.insert(result, at: 0)
+        lastResult = result
+        lastAssignmentResult = result
+        assignmentError = TagAssignmentError(title: title, message: message)
+    }
+}
+
+/// Lets the caller decide what to do next, e.g. close the picker once the tag is assigned or moved.
+enum TagAssignmentOutcome {
+    case assigned, moved, alreadyAssigned, needsConfirmation, failed
+}
+
+/// A scanned tag that belongs to other spools, awaiting the user's OK to move it to `spool`.
+struct PendingTagMove: Identifiable {
+    let id = UUID()
+    let spool: SpoolResponse
+    let uidHex: String
+    let tagPayload: any NFCTagPayload
+    let currentOwners: [SpoolResponse]
+
+    var ownersDescription: String {
+        currentOwners.map { "\($0.displayName) (#\($0.id))" }.joined(separator: ", ")
+    }
+}
+
+struct TagAssignmentError: Identifiable {
+    let id = UUID()
+    let title: String
+    let message: String
 }
