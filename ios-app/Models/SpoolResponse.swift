@@ -41,11 +41,14 @@ struct SpoolResponse: Codable, Identifiable {
 
     var tagCount: Int { tagUIDs.count }
 
+    private static let cardUidsDecoder = JSONDecoder()
+
     var tagUIDs: [String] {
         guard let raw = extra?.cardUids, !raw.isEmpty else { return [] }
         let decoded: String
-        if let data = raw.data(using: .utf8),
-           let s = try? JSONDecoder().decode(String.self, from: data) {
+        // Only JSON-decode quoted values; this runs for every row on each render.
+        if raw.hasPrefix("\""), let data = raw.data(using: .utf8),
+           let s = try? Self.cardUidsDecoder.decode(String.self, from: data) {
             decoded = s
         } else {
             decoded = raw

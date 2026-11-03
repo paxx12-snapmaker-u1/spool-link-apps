@@ -117,6 +117,7 @@ struct SpoolsView: View {
     @State private var selectedSpool: SpoolResponse?
     @AppStorage("spoolsSortBy") private var sortByRaw: String = SpoolSort.dateAdded.rawValue
     @AppStorage("spoolsSortAscending") private var sortAscending = true
+    @Environment(\.scenePhase) private var scenePhase
 
     private var sortBy: SpoolSort { SpoolSort(rawValue: sortByRaw) ?? .dateAdded }
 
@@ -133,6 +134,7 @@ struct SpoolsView: View {
     }
 
     @ViewBuilder private var spoolsContent: some View {
+        let duplicates = duplicateTagUIDs
         if viewModel.isFetchingSpools && viewModel.spools.isEmpty {
             ProgressView("Loading spools…")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -151,7 +153,7 @@ struct SpoolsView: View {
                 ForEach(groupedSpools, id: \.header) { group in
                     Section(group.header) {
                         ForEach(group.items) { spool in
-                            SpoolRow(spool: spool, hasConflict: spool.tagUIDs.contains { duplicateTagUIDs.contains($0) })
+                            SpoolRow(spool: spool, hasConflict: spool.tagUIDs.contains { duplicates.contains($0) })
                                 .contentShape(Rectangle())
                                 .onTapGesture { selectedSpool = spool }
                         }
@@ -171,7 +173,18 @@ struct SpoolsView: View {
                     .onAppear { viewModel.loadMoreSpools() }
                 }
             }
-            .refreshable { viewModel.fetchSpools(reset: true) }
+            .refreshable { await viewModel.loadSpools(reset: true) }
+            .safeAreaInset(edge: .top) {
+                if let error = viewModel.spoolsErrorMessage {
+                    Label("Couldn't refresh: \(error)", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal)
+                        .padding(.vertical, 8)
+                        .background(.regularMaterial)
+                }
+            }
         }
     }
 
@@ -194,8 +207,9 @@ struct SpoolsView: View {
                     SpoolDetailSheet(spool: spool, viewModel: viewModel)
                 }
         }
-        .onAppear {
-            if viewModel.spools.isEmpty { viewModel.fetchSpools() }
+        .onAppear { viewModel.refreshSpoolsIfStale() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { viewModel.refreshSpoolsIfStale() }
         }
     }
 
