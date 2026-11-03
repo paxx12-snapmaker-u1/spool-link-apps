@@ -19,22 +19,26 @@ class NFCManager: NSObject, ObservableObject {
 
     private var session: NFCTagReaderSession?
 
-    func startScanning() {
+    /// Returns false if no session was started (NFC unavailable, or the previous session hasn't closed yet).
+    @discardableResult
+    func startScanning() -> Bool {
         guard NFCTagReaderSession.readingAvailable else {
             sessionMessage = "NFC not available on this device"
-            return
+            return false
         }
 
         guard session == nil else {
-            sessionMessage = "Session already active"
-            return
+            sessionMessage = "Previous scan is still closing — try again"
+            return false
         }
 
-        session = NFCTagReaderSession(pollingOption: [.iso14443], delegate: self)
+        // Deliver delegate callbacks on main: they touch `session` and UI state shared with startScanning/stopScanning.
+        session = NFCTagReaderSession(pollingOption: [.iso14443], delegate: self, queue: .main)
         session?.alertMessage = "Hold your device near an NFC tag"
         session?.begin()
         isScanning = true
         sessionMessage = "Scanning for NFC tags..."
+        return true
     }
 
     func stopScanning() {
@@ -57,19 +61,20 @@ extension NFCManager: NFCTagReaderSessionDelegate {
     }
 
     func tagReaderSession(_ session: NFCTagReaderSession, didInvalidateWithError error: Error) {
+        // Only the current session matters. If we ended it ourselves (stop, read, error) state is already reset,
+        // and a previous session's invalidation can arrive after a new one has begun.
+        guard session === self.session else { return }
         self.session = nil
         isScanning = false
 
-        if let nfcError = error as? NFCReaderError, nfcError.code == .readerSessionInvalidationErrorUserCanceled {
-            sessionMessage = "Scanning stopped"
-        } else {
-            sessionMessage = "Session invalidated: \(error.localizedDescription)"
-            delegate?.nfcManagerDidInvalidateSession(self, error: error)
-        }
+        // Report a user cancel too (as a nil error), or a pending assignment would wait forever.
+        let cancelled = (error as? NFCReaderError)?.code == .readerSessionInvalidationErrorUserCanceled
+        sessionMessage = cancelled ? "Scanning stopped" : "Session invalidated: \(error.localizedDescription)"
+        delegate?.nfcManagerDidInvalidateSession(self, error: cancelled ? nil : error)
     }
 
     func tagReaderSession(_ session: NFCTagReaderSession, didDetect tags: [NFCTag]) {
-        Task {
+        Task { @MainActor in
             do {
                 guard let firstTag = tags.first else {
                     session.invalidate(errorMessage: "No tag detected")
@@ -116,6 +121,11 @@ extension NFCManager: NFCTagReaderSessionDelegate {
                 let payload = ndefMessage.map { parsePayload(from: $0) }
                     ?? RawNDEFTagPayload(mimeType: nil, payloadSize: 0, recordCount: 0)
 
+                // The scan may have been cancelled, or replaced by a new one, while the tag was being read.
+                guard session === self.session else {
+                    session.invalidate()
+                    return
+                }
                 session.invalidate()
                 self.session = nil
                 isScanning = false
@@ -124,6 +134,8 @@ extension NFCManager: NFCTagReaderSessionDelegate {
 
             } catch {
                 session.invalidate(errorMessage: "Error reading tag: \(error.localizedDescription)")
+                // As above: a failed read from a replaced session mustn't tear down the new one.
+                guard session === self.session else { return }
                 self.session = nil
                 isScanning = false
                 delegate?.nfcManager(self, didFailWithError: error)
