@@ -136,7 +136,9 @@ class SpoolmanViewModel(application: Application) : AndroidViewModel(application
     fun removeTag(uidHex: String, spool: SpoolResponse) {
         viewModelScope.launch {
             try {
-                val updatedUIDs = spool.tagUIDs.filter { it.uppercase() != uidHex.uppercase() }
+                // The caller's spool may be a stale snapshot; filtering it would drop tags assigned since.
+                val currentUIDs = runCatching { api.getSpool(spool.id).tagUIDs }.getOrDefault(spool.tagUIDs)
+                val updatedUIDs = currentUIDs.filter { it.uppercase() != uidHex.uppercase() }
                 api.updateSpoolCardUids(spool.id, updatedUIDs)
                 refreshSpool(spool.id)
                 if (lastResult?.spoolId == spool.id) {
@@ -355,7 +357,8 @@ class SpoolmanViewModel(application: Application) : AndroidViewModel(application
     suspend fun processAssignment(spool: SpoolResponse, uidHex: String, tagPayload: NFCTagPayload) {
         statusMessage = "Assigning tag to ${spool.displayName}…"
         try {
-            val currentUIDs = spool.tagUIDs
+            // The caller's spool may be a stale snapshot; building on it would drop tags assigned since.
+            val currentUIDs = api.getSpool(spool.id).tagUIDs
             val updatedUIDs = if (currentUIDs.contains(uidHex)) currentUIDs else currentUIDs + uidHex
             api.updateSpoolCardUids(spool.id, updatedUIDs)
 
