@@ -97,7 +97,8 @@ editable presets for brands, materials, and variants.
 
 **Tag Storage** selects where tag links are kept: **Card UIDs** (the default) or **Spoolman native
 tags** (Spoolman v0.27.0 or newer). Use the same setting as **Spoolman Tag Storage** on the printer.
-Changing it here does not move existing links; switching the printer's setting does.
+Picking a store does not move links; switching the printer's setting does, or use **Move existing
+links here**, which moves every link on the server to the selected store and lists any it left in place.
 
 <a href="images/android/13-settings.png"><img src="images/android/13-settings.png" alt="Settings" height="520" /></a>
 

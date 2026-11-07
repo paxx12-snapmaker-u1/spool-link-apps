@@ -37,6 +37,7 @@ web-app/
 | `createSpoolFromTag(uidHex, payload, meta)` | Vendor find-or-create → filament create → spool create |
 | `removeTag(spool, uidHex)` | Unlink one UID from the selected store |
 | `removeAllTags(spool)` | Unlink all UIDs from the selected store |
+| `SpoolmanAPI.migrateTags(target)` | Move every link between stores, following the firmware's `spoollink_migrate.py` |
 | `fetchSpools(reset)` | Paginated spool list (page size 20) |
 | `tagFields(payload)` | Extract `{ label, value, colorHex? }` fields from a tag payload for display |
 | `renderTagDetailTable(payload, uidHex)` | Build the tag detail DOM table using `tagFields()` |

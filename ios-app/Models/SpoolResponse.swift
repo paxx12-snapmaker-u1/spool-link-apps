@@ -74,9 +74,14 @@ struct SpoolResponse: Codable, Identifiable {
     var tagCount: Int { tagUIDs.count }
 
     var tagUIDs: [String] {
-        if TagStore.current == .native {
-            return (tags ?? []).compactMap { $0.uid?.uppercased() }
-        }
+        TagStore.current == .native ? nativeTagUIDs : cardUidEntries
+    }
+
+    var nativeTagUIDs: [String] {
+        (tags ?? []).compactMap { $0.uid?.uppercased() }
+    }
+
+    var cardUidEntries: [String] {
         guard let raw = extra?.cardUids, !raw.isEmpty else { return [] }
         let decoded: String
         if let data = raw.data(using: .utf8),

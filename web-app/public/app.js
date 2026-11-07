@@ -43,7 +43,11 @@ class SpoolmanAPI {
   }
 
   async requireTagStoreSupport() {
-    if (Settings.tagStore !== 'native' || this.nativeTagsConfirmed) return;
+    if (Settings.tagStore === 'native') await this.requireNativeTags();
+  }
+
+  async requireNativeTags() {
+    if (this.nativeTagsConfirmed) return;
     const res = await fetch(`${this.baseURL}api/v1/info`);
     if (!res.ok) throw new Error(`Server error: ${res.status}`);
     const { version } = await res.json();
@@ -53,12 +57,121 @@ class SpoolmanAPI {
     this.nativeTagsConfirmed = true;
   }
 
+  // Links without moving. Returns the id of another spool already holding the tag, if any.
   async postNativeTag(spoolId, uid) {
-    return fetch(`${this.baseURL}api/v1/spool/${spoolId}/tag`, {
+    const res = await fetch(`${this.baseURL}api/v1/spool/${spoolId}/tag`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ uid }),
     });
+    if (res.ok) return null;
+    if (res.status !== 409) throw new Error(`Server error: ${res.status}`);
+    const conflict = await res.json().catch(() => null);
+    const holder = conflict?.spool_id;
+    if (holder == null || holder === spoolId) {
+      throw new Error(conflict?.message ?? `Tag ${uid} is already linked`);
+    }
+    return holder;
+  }
+
+  // Moves every link into `target` and removes it from the other store, following the U1 firmware's
+  // spoollink_migrate.py. A UID that cannot be moved stays where it was and is reported; running this
+  // again retries it. Returns log lines, ending with a summary.
+  async migrateTags(target) {
+    const logs = [];
+    const { moved, failed } = target === 'native' ? await this.migrateToNative(logs) : await this.migrateToCardUids(logs);
+    const name = target === 'native' ? 'Spoolman native tags' : 'Card UIDs';
+    logs.push(`✓ Moved ${moved} card(s) to ${name}${failed ? `; ${failed} left in place, see above` : ''}.`);
+    return logs;
+  }
+
+  async fetchMigrationSpools() {
+    const url = new URL(`${this.baseURL}api/v1/spool`);
+    url.searchParams.set('limit', 1000);
+    url.searchParams.set('allow_archived', true);
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Server error: ${res.status}`);
+    return res.json();
+  }
+
+  // A UID listed on several spools is kept for the user to resolve; one already tagged on another spool
+  // is dropped, as that tag is the newer link.
+  async migrateToNative(logs) {
+    await this.requireNativeTags();
+    const spools = await this.fetchMigrationSpools();
+    const entries = spool => [...new Set(spoolCardUidEntries(spool).map(u => u.toUpperCase()))];
+    const owners = new Map();
+    for (const spool of spools) {
+      for (const uid of entries(spool)) owners.set(uid, [...(owners.get(uid) ?? []), spool.id]);
+    }
+    let moved = 0;
+    let failed = 0;
+    for (const spool of spools) {
+      const uids = entries(spool);
+      if (uids.length === 0) continue;
+      const keep = [];
+      for (const uid of uids) {
+        const holders = owners.get(uid);
+        if (holders.length > 1) {
+          logs.push(`⚠ Card ${uid} is on spools ${holders.map(i => `#${i}`).join(', ')}, not moved`);
+          keep.push(uid);
+          failed++;
+          continue;
+        }
+        if (!spoolNativeTagUIDs(spool).includes(uid)) {
+          try {
+            const holder = await this.postNativeTag(spool.id, uid);
+            if (holder != null) {
+              logs.push(`Card ${uid} on spool #${spool.id} is already tagged on spool #${holder}, dropping it`);
+              continue;
+            }
+          } catch (e) {
+            logs.push(`⚠ Card ${uid} on spool #${spool.id}: ${e.message}`);
+            keep.push(uid);
+            failed++;
+            continue;
+          }
+        }
+        moved++;
+      }
+      if (keep.length !== uids.length) await this.updateSpoolCardUids(spool.id, keep);
+    }
+    return { moved, failed };
+  }
+
+  // Any other spool still listing a UID in card_uids has it removed, as the tag was the newer link.
+  async migrateToCardUids(logs) {
+    const info = await fetch(`${this.baseURL}api/v1/info`);
+    if (!info.ok) throw new Error(`Server error: ${info.status}`);
+    if (!supportsNativeTags((await info.json()).version)) return { moved: 0, failed: 0 };
+    await this.ensureCardUidsFieldExists();
+    const spools = await this.fetchMigrationSpools();
+    const tagged = new Map();
+    for (const spool of spools) {
+      for (const uid of spoolNativeTagUIDs(spool)) tagged.set(uid, spool.id);
+    }
+    let moved = 0;
+    let failed = 0;
+    for (const spool of spools) {
+      const uids = [...new Set(spoolCardUidEntries(spool).map(u => u.toUpperCase()))];
+      const keep = uids.filter(u => (tagged.get(u) ?? spool.id) === spool.id);
+      for (const uid of uids) {
+        if (!keep.includes(uid)) logs.push(`Card ${uid} on spool #${spool.id} is tagged on spool #${tagged.get(uid)}, dropping it`);
+      }
+      const tags = spoolNativeTagUIDs(spool);
+      const merged = [...keep, ...tags.filter(u => !keep.includes(u))];
+      if (merged.join() !== spoolCardUidEntries(spool).join()) await this.updateSpoolCardUids(spool.id, merged);
+      for (const uid of tags) {
+        try {
+          await this.deleteNativeTag(spool.id, uid);
+          moved++;
+        } catch (e) {
+          logs.push(`⚠ Unlinking tag ${uid} from spool #${spool.id}: ${e.message}`);
+          failed++;
+        }
+      }
+    }
+    return { moved, failed };
   }
 
   async deleteNativeTag(spoolId, uid) {
@@ -75,17 +188,10 @@ class SpoolmanAPI {
       return null;
     }
     await this.requireTagStoreSupport();
-    let res = await this.postNativeTag(spool.id, upper);
-    if (res.ok) return null;
-    if (res.status !== 409) throw new Error(`Server error: ${res.status}`);
-    const conflict = await res.json().catch(() => null);
-    const holder = conflict?.spool_id;
-    if (holder == null || holder === spool.id) {
-      throw new Error(conflict?.message ?? `Tag ${upper} is already linked`);
-    }
+    const holder = await this.postNativeTag(spool.id, upper);
+    if (holder == null) return null;
     await this.deleteNativeTag(holder, upper);
-    res = await this.postNativeTag(spool.id, upper);
-    if (!res.ok) throw new Error(`Server error: ${res.status}`);
+    if (await this.postNativeTag(spool.id, upper) != null) throw new Error(`Tag ${upper} is already linked`);
     return holder;
   }
 
@@ -335,9 +441,14 @@ function supportsNativeTags(version) {
 }
 
 function spoolTagUIDs(spool) {
-  if (Settings.tagStore === 'native') {
-    return (spool.tags ?? []).map(t => t.uid?.toUpperCase()).filter(Boolean);
-  }
+  return Settings.tagStore === 'native' ? spoolNativeTagUIDs(spool) : spoolCardUidEntries(spool);
+}
+
+function spoolNativeTagUIDs(spool) {
+  return (spool.tags ?? []).map(t => t.uid?.toUpperCase()).filter(Boolean);
+}
+
+function spoolCardUidEntries(spool) {
   const raw = spool.extra?.card_uids;
   if (!raw) return [];
   let decoded = raw;
@@ -1599,8 +1710,37 @@ function initSettings() {
     Settings.tagStore = tagStoreSel.value;
     document.getElementById('test-logs').classList.add('hidden');
     document.getElementById('btn-save-wrap').classList.add('hidden');
+    document.getElementById('tag-move-logs').classList.add('hidden');
     if (Settings.tagStore !== 'native') api.ensureCardUidsFieldExists().catch(() => {});
     renderSpools();
+  });
+
+  document.getElementById('btn-move-tags').addEventListener('click', () => {
+    const name = tagStoreSel.selectedOptions[0].textContent;
+    showConfirm(
+      'Move Existing Links',
+      `Move every tag link on this Spoolman server to ${name} and clear them from the other store? The printer stops finding spools until its Spoolman Tag Storage setting matches. A card that can't be moved stays where it is and is listed here.`,
+      'Move Links',
+      async () => {
+        const btn = document.getElementById('btn-move-tags');
+        const logsEl = document.getElementById('tag-move-logs');
+        btn.disabled = true;
+        logsEl.innerHTML = '';
+        logsEl.classList.remove('hidden');
+        let logs;
+        try {
+          logs = await api.migrateTags(Settings.tagStore);
+        } catch (e) {
+          logs = [`✗ ${e.message}`];
+        }
+        for (const line of logs) {
+          const cls = line.startsWith('✓') ? 'success' : line.startsWith('✗') ? 'error' : '';
+          logsEl.appendChild(el('div', { class: `log-line ${cls}` }, line));
+        }
+        btn.disabled = false;
+        fetchSpools(true);
+      },
+    );
   });
 
   urlInput.addEventListener('input', () => {

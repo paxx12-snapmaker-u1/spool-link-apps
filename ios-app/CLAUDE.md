@@ -104,6 +104,7 @@ meta.filamentName(style: nameStyle)
 - `findOrCreateVendor(name:)` — use before `createSpoolFromInfo` when brand is non-nil.
 - `linkTag(to:uid:store:)`, `unlinkTag(from:uid:store:)`, `unlinkAllTags(from:store:)` — all tag writes; the ViewModel
   passes `TagStore.current`.
+- `migrateTags(to:)` — moves every link between stores, following the firmware's `spoollink_migrate.py`.
 - Do not add view logic or `UserDefaults` reads here; those belong in the ViewModel.
 
 ## Sheets and State in `ScanView`

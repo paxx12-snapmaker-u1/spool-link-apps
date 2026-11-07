@@ -35,6 +35,11 @@ class SpoolmanViewModel(application: Application) : AndroidViewModel(application
     var tagStore by mutableStateOf(TagStore.fromName(prefs.getString("tag_store", null)))
         private set
 
+    var isMovingTags by mutableStateOf(false)
+        private set
+    var tagMoveLogs by mutableStateOf<List<String>>(emptyList())
+        private set
+
     private var api = SpoolmanApi(baseUrl, tagStore)
 
     var isScanning by mutableStateOf(false)
@@ -76,6 +81,7 @@ class SpoolmanViewModel(application: Application) : AndroidViewModel(application
 
     fun updateTagStore(store: TagStore) {
         tagStore = store
+        tagMoveLogs = emptyList()
         prefs.edit().putString("tag_store", store.name).apply()
         api.tagStore = store
         // Spool responses carry both stores, so loaded spools only need re-reading.
@@ -84,6 +90,21 @@ class SpoolmanViewModel(application: Application) : AndroidViewModel(application
             scanHistory[i] = scanHistory[i].withSpoolResponse(scanHistory[i].spoolResponse?.forStore(store))
         }
         lastResult = lastResult?.let { it.withSpoolResponse(it.spoolResponse?.forStore(store)) }
+    }
+
+    fun moveTagsToSelectedStore() {
+        if (isMovingTags) return
+        isMovingTags = true
+        tagMoveLogs = emptyList()
+        viewModelScope.launch {
+            tagMoveLogs = try {
+                api.migrateTags(tagStore)
+            } catch (e: Exception) {
+                listOf("✗ ${e.message ?: "Unable to move links"}")
+            }
+            isMovingTags = false
+            fetchSpools(reset = true)
+        }
     }
 
     fun savedNameStyle(): FilamentNameStyle =

@@ -43,6 +43,7 @@ fun SettingsScreen(viewModel: SpoolmanViewModel) {
     var showStyleMenu by remember { mutableStateOf(false) }
     var storeRawTags by remember { mutableStateOf(viewModel.savedStoreRawTags()) }
     var showTagStoreMenu by remember { mutableStateOf(false) }
+    var showMoveTagsConfirm by remember { mutableStateOf(false) }
 
     var presetsEditorTarget by remember { mutableStateOf<String?>(null) }
 
@@ -158,6 +159,7 @@ fun SettingsScreen(viewModel: SpoolmanViewModel) {
         item {
             SectionHeader("Tag Storage")
             Surface(Modifier.fillMaxWidth().padding(horizontal = 16.dp), shape = RoundedCornerShape(12.dp), tonalElevation = 2.dp) {
+                Column {
                 Box {
                     Row(
                         Modifier.fillMaxWidth().clickable { showTagStoreMenu = true }.padding(16.dp),
@@ -193,11 +195,42 @@ fun SettingsScreen(viewModel: SpoolmanViewModel) {
                         }
                     }
                 }
+                HorizontalDivider(Modifier.padding(start = 16.dp))
+                Row(
+                    Modifier.fillMaxWidth()
+                        .clickable(enabled = !viewModel.isMovingTags) { showMoveTagsConfirm = true }
+                        .padding(16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Move existing links here", style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.primary)
+                    if (viewModel.isMovingTags) {
+                        CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                    }
+                }
+                if (viewModel.tagMoveLogs.isNotEmpty()) {
+                    Column(modifier = Modifier.fillMaxWidth().padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        viewModel.tagMoveLogs.forEach { line ->
+                            Text(
+                                text = line,
+                                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                                color = when {
+                                    line.startsWith("✗") -> MaterialTheme.colorScheme.error
+                                    line.startsWith("✓") -> Color(0xFF34C759)
+                                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                }
+                            )
+                        }
+                    }
+                }
+                }
             }
             Spacer(Modifier.height(4.dp))
             Text("Must match Spoolman Tag Storage in the printer's firmware-config. Native tags need " +
-                "Spoolman v0.27.0 or newer. Changing this does not move existing links; " +
-                "switching the printer's setting does.",
+                "Spoolman v0.27.0 or newer. Picking a store does not move links; switching the printer's " +
+                "setting does, or use Move existing links here.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 28.dp))
         }
@@ -316,6 +349,27 @@ fun SettingsScreen(viewModel: SpoolmanViewModel) {
                 }
             }
         }
+    }
+
+    if (showMoveTagsConfirm) {
+        AlertDialog(
+            onDismissRequest = { showMoveTagsConfirm = false },
+            title = { Text("Move Existing Links") },
+            text = {
+                Text("Move every tag link on this Spoolman server to ${viewModel.tagStore.displayName} and clear " +
+                    "them from the other store? The printer stops finding spools until its Spoolman Tag Storage " +
+                    "setting matches. A card that can't be moved stays where it is and is listed here.")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.moveTagsToSelectedStore()
+                    showMoveTagsConfirm = false
+                }) { Text("Move Links") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showMoveTagsConfirm = false }) { Text("Cancel") }
+            }
+        )
     }
 
     presetsEditorTarget?.let { target ->

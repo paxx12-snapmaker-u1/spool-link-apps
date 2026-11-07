@@ -107,7 +107,30 @@ Tag links live in one of two stores, picked under **Settings → Tag Storage**:
 The apps read and write only the selected store, with no fallback to the other. This matches the Snapmaker U1
 extended firmware, whose SpoolLink reads only its own `tag_store`, so the app setting must match the printer's
 **Spoolman Tag Storage** setting in firmware-config (hidden: open firmware-config with `?hidden` at the end of its
-URL). Changing the app setting moves nothing; switching the printer's setting migrates every link on the server.
+URL). Picking a store in the app moves nothing; see [Moving links](#moving-links-between-stores).
+
+### Moving links between stores
+
+Switching the printer's setting migrates every link on the server with `spoollink_migrate.py`, so an app then only
+has to pick the same store. **Settings → Tag Storage → Move existing links here** runs the same rules from the app,
+towards the selected store, over all spools (`limit=1000&allow_archived=true`). It can be run from either side:
+once the links are moved, the other side's migration finds nothing left to do. Unlike the firmware, the app cannot
+stop the printer's SpoolLink meanwhile, so avoid running it while the printer is loading filament.
+
+To native tags, for each `card_uids` entry:
+
+- links it as a native tag, then removes it from `card_uids`;
+- drops it from `card_uids` without linking if another spool already holds the tag (`409`), as the tag is the newer
+  link;
+- leaves it in `card_uids` and reports it when the same UID is on several spools, or when linking fails.
+
+To Card UIDs, for each native tag (creating the `card_uids` field if missing):
+
+- appends it to the spool's `card_uids`, removing the UID from any other spool's `card_uids`, as the tag is the newer
+  link;
+- then unlinks the tag. On a Spoolman older than v0.27.0 there are no tags, and nothing is moved.
+
+A link that was left in place stays there. Fix it in Spoolman and run the move again to retry.
 
 ---
 

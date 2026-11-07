@@ -20,6 +20,8 @@ class SpoolmanViewModel: NFCManagerDelegate {
     var availableFilaments: [SpoolmanAPI.FilamentResponse] = []
     var isLoadingFilaments = false
     var filamentsErrorMessage: String?
+    var isMovingTags = false
+    var tagMoveLogs: [String] = []
     private var spoolsOffset = 0
     private let spoolsPageSize = 20
 
@@ -37,6 +39,20 @@ class SpoolmanViewModel: NFCManagerDelegate {
     }
 
     private var tagStore: TagStore { TagStore.current }
+
+    @MainActor
+    func moveTagsToSelectedStore() async {
+        guard !isMovingTags else { return }
+        isMovingTags = true
+        tagMoveLogs = []
+        do {
+            tagMoveLogs = try await api.migrateTags(to: tagStore)
+        } catch {
+            tagMoveLogs = ["✗ \(error.localizedDescription)"]
+        }
+        isMovingTags = false
+        fetchSpools(reset: true)
+    }
 
     // MARK: - Spool list
 

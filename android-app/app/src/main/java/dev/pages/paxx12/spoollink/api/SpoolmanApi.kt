@@ -8,6 +8,7 @@ import dev.pages.paxx12.spoollink.model.SpoolResponse
 import dev.pages.paxx12.spoollink.model.TagStore
 import com.google.gson.Gson
 import com.google.gson.JsonObject
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -64,12 +65,20 @@ class SpoolmanApi(baseUrl: String, var tagStore: TagStore = TagStore.CARD_UIDS) 
 
     /** Throws when native tags are selected but this server has none. */
     suspend fun requireTagStoreSupport() = withContext(Dispatchers.IO) {
-        if (tagStore != TagStore.NATIVE || nativeTagsConfirmed) return@withContext
-        val version = service.fetchInfo().version.orEmpty()
-        if (!TagStore.supportsNativeTags(version)) {
-            throw IOException("Native tags need Spoolman v0.27.0 or newer (server is ${version.ifEmpty { "unknown" }})")
+        if (tagStore == TagStore.NATIVE) requireNativeTags()
+    }
+
+    private suspend fun serverHasNativeTags(): Boolean {
+        if (nativeTagsConfirmed) return true
+        nativeTagsConfirmed = TagStore.supportsNativeTags(service.fetchInfo().version.orEmpty())
+        return nativeTagsConfirmed
+    }
+
+    private suspend fun requireNativeTags() {
+        if (!serverHasNativeTags()) {
+            val version = service.fetchInfo().version.orEmpty().ifEmpty { "unknown" }
+            throw IOException("Native tags need Spoolman v0.27.0 or newer (server is $version)")
         }
-        nativeTagsConfirmed = true
     }
 
     /** Links the tag to the spool. Returns the id of another spool it had to be taken from, if any. */
@@ -80,24 +89,130 @@ class SpoolmanApi(baseUrl: String, var tagStore: TagStore = TagStore.CARD_UIDS) 
             return@withContext null
         }
         requireTagStoreSupport()
-        val body = gson.toJson(JsonObject().apply { addProperty("uid", upper) })
+        val holder = postNativeTag(spool.id, upper) ?: return@withContext null
+        deleteNativeTag(holder, upper)
+        if (postNativeTag(spool.id, upper) != null) throw IOException("Tag $upper is already linked")
+        holder
+    }
+
+    /** Links without moving. Returns the id of another spool already holding the tag, if any. */
+    private suspend fun postNativeTag(spoolId: Int, uid: String): Int? {
+        val body = gson.toJson(JsonObject().apply { addProperty("uid", uid) })
             .toRequestBody("application/json".toMediaType())
         try {
-            service.linkTag(spool.id, body)
-            null
+            service.linkTag(spoolId, body)
+            return null
         } catch (e: HttpException) {
             if (e.code() != 409) throw e
             val conflict = runCatching {
                 gson.fromJson(e.response()?.errorBody()?.string(), TagConflictResponse::class.java)
             }.getOrNull()
             val holder = conflict?.spoolId
-            if (holder == null || holder == spool.id) {
-                throw IOException(conflict?.message ?: "Tag $upper is already linked")
+            if (holder == null || holder == spoolId) {
+                throw IOException(conflict?.message ?: "Tag $uid is already linked")
             }
-            deleteNativeTag(holder, upper)
-            service.linkTag(spool.id, body)
-            holder
+            return holder
         }
+    }
+
+    /**
+     * Moves every link into [target] and removes it from the other store, following the U1 firmware's
+     * `spoollink_migrate.py`. A UID that cannot be moved stays where it was and is reported; running
+     * this again retries it. Returns log lines, ending with a summary.
+     */
+    suspend fun migrateTags(target: TagStore): List<String> = withContext(Dispatchers.IO) {
+        val logs = mutableListOf<String>()
+        val (moved, failed) = if (target == TagStore.NATIVE) migrateToNative(logs) else migrateToCardUids(logs)
+        val suffix = if (failed > 0) "; $failed left in place, see above" else ""
+        logs.add("✓ Moved $moved card(s) to ${target.displayName}$suffix.")
+        logs
+    }
+
+    // A UID listed on several spools is kept for the user to resolve; one already tagged on
+    // another spool is dropped, as that tag is the newer link.
+    private suspend fun migrateToNative(logs: MutableList<String>): Pair<Int, Int> {
+        requireNativeTags()
+        val spools = service.findSpoolsByCardUidCandidateSpools(limit = 1000, allowArchived = true)
+        fun entries(spool: SpoolResponse) = spool.cardUidEntries.map { it.uppercase() }.distinct()
+        val owners = mutableMapOf<String, MutableList<Int>>()
+        for (spool in spools) for (uid in entries(spool)) owners.getOrPut(uid) { mutableListOf() }.add(spool.id)
+        var moved = 0
+        var failed = 0
+        for (spool in spools) {
+            val uids = entries(spool)
+            if (uids.isEmpty()) continue
+            val keep = mutableListOf<String>()
+            for (uid in uids) {
+                val holders = owners.getValue(uid)
+                if (holders.size > 1) {
+                    logs.add("⚠ Card $uid is on spools ${holders.joinToString { "#$it" }}, not moved")
+                    keep.add(uid)
+                    failed++
+                    continue
+                }
+                if (uid !in spool.nativeTagUIDs) {
+                    val holder = try {
+                        postNativeTag(spool.id, uid)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        logs.add("⚠ Card $uid on spool #${spool.id}: ${e.message}")
+                        keep.add(uid)
+                        failed++
+                        continue
+                    }
+                    if (holder != null) {
+                        logs.add("Card $uid on spool #${spool.id} is already tagged on spool #$holder, dropping it")
+                        continue
+                    }
+                }
+                moved++
+            }
+            if (keep != uids) updateSpoolCardUids(spool.id, keep)
+        }
+        return moved to failed
+    }
+
+    // Any other spool still listing a UID in `card_uids` has it removed, as the tag was the newer link.
+    private suspend fun migrateToCardUids(logs: MutableList<String>): Pair<Int, Int> {
+        if (!serverHasNativeTags()) return 0 to 0
+        ensureCardUidsField()
+        val spools = service.findSpoolsByCardUidCandidateSpools(limit = 1000, allowArchived = true)
+        val tagged = spools.flatMap { spool -> spool.nativeTagUIDs.map { it to spool.id } }.toMap()
+        var moved = 0
+        var failed = 0
+        for (spool in spools) {
+            val uids = spool.cardUidEntries.map { it.uppercase() }.distinct()
+            val keep = uids.filter { (tagged[it] ?: spool.id) == spool.id }
+            for (uid in uids - keep.toSet()) {
+                logs.add("Card $uid on spool #${spool.id} is tagged on spool #${tagged[uid]}, dropping it")
+            }
+            val merged = keep + spool.nativeTagUIDs.filter { it !in keep }
+            if (merged != spool.cardUidEntries) updateSpoolCardUids(spool.id, merged)
+            for (uid in spool.nativeTagUIDs) {
+                try {
+                    deleteNativeTag(spool.id, uid)
+                    moved++
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    logs.add("⚠ Unlinking tag $uid from spool #${spool.id}: ${e.message}")
+                    failed++
+                }
+            }
+        }
+        return moved to failed
+    }
+
+    private suspend fun ensureCardUidsField() {
+        if (service.fetchSpoolFields().any { it.key == "card_uids" }) return
+        val body = JsonObject().apply {
+            addProperty("name", "Card UIDs")
+            addProperty("field_type", "text")
+            addProperty("order", 1)
+            addProperty("default_value", gson.toJson(""))
+        }
+        service.createCardUidsField(gson.toJson(body).toRequestBody("application/json".toMediaType()))
     }
 
     suspend fun unlinkTag(spool: SpoolResponse, uid: String) = withContext(Dispatchers.IO) {

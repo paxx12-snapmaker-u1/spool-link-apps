@@ -59,7 +59,14 @@ data class SpoolResponse(
 
     val tagUIDs: List<String>
         get() {
-            if (usesNativeTags) return tags.orEmpty().mapNotNull { it.uid?.uppercase() }
+            return if (usesNativeTags) nativeTagUIDs else cardUidEntries
+        }
+
+    val nativeTagUIDs: List<String>
+        get() = tags.orEmpty().mapNotNull { it.uid?.uppercase() }
+
+    val cardUidEntries: List<String>
+        get() {
             val raw = extra?.cardUids ?: return emptyList()
             if (raw.isEmpty()) return emptyList()
             val decoded = if (raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"'))

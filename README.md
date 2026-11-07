@@ -15,7 +15,8 @@ other applications from the relevant app marketplaces.
 3. The card's UID is linked to the spool in Spoolman, and removed from any other spool it was
    previously linked to. Links are stored in the `card_uids` custom field by default, or as Spoolman
    native tags (v0.27.0 or newer) when selected under **Settings → Tag Storage**. Use the same
-   setting as **Spoolman Tag Storage** on the printer, which reads only that store.
+   setting as **Spoolman Tag Storage** on the printer, which reads only that store. Existing links
+   can be moved between the two from the same settings section.
 
 A tag can be reassigned or unlinked at any time by scanning it again. Spools work best
 with two tags — one on each side — so the spool is detected regardless of orientation.

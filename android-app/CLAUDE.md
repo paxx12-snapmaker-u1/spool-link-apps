@@ -72,7 +72,7 @@ Bottom sheets use `ModalBottomSheet`. `SpoolDetailSheet` and `CreateSpoolSheet` 
 Key ViewModel methods: `ensureSpoolsLoaded()`, `fetchSpools(reset)`, `loadMoreSpools()`, `processNfcTag()`,
 `processAssignment()`, `startTagAssignment(spool)`, `cancelTagAssignment()`, `removeTag(uidHex, spool)`,
 `removeAllTags(spool)`, `createSpoolFromTag()`, `loadFilaments()`, `loadFilamentsIfNeeded()`, `updatePresets(presets)`,
-`savedBaseUrl()`, `updateBaseUrl(url)`, `updateTagStore(store)`, `savedNameStyle()`, `saveNameStyle(style)`.
+`savedBaseUrl()`, `updateBaseUrl(url)`, `updateTagStore(store)`, `moveTagsToSelectedStore()`, `savedNameStyle()`, `saveNameStyle(style)`.
 
 ## API Paths
 
@@ -92,7 +92,8 @@ All Spoolman endpoints are under `api/v1/`:
 Tag writes go through `SpoolmanApi.linkTag(spool, uid)`, `unlinkTag(spool, uid)` and `unlinkAllTags(spool)`, which use
 the selected `TagStore`. In the `CARD_UIDS` store they patch `extra.card_uids` with a JSON-encoded comma-separated
 string; `ensureField("spool", "card_uids", ...)` must run before the first write. `SpoolmanApi` tags every returned
-spool with the store via `forStore()`, so `SpoolResponse.tagUIDs` reads the right one.
+spool with the store via `forStore()`, so `SpoolResponse.tagUIDs` reads the right one. `migrateTags(target)` moves every
+link between stores, following the firmware's `spoollink_migrate.py`.
 
 ## card_uids Format
 
