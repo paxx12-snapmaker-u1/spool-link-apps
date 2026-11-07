@@ -32,7 +32,15 @@ class SpoolmanViewModel(application: Application) : AndroidViewModel(application
     )
         private set
 
-    private var api = SpoolmanApi(baseUrl)
+    var tagStore by mutableStateOf(TagStore.fromName(prefs.getString("tag_store", null)))
+        private set
+
+    var isMovingTags by mutableStateOf(false)
+        private set
+    var tagMoveLogs by mutableStateOf<List<String>>(emptyList())
+        private set
+
+    private var api = SpoolmanApi(baseUrl, tagStore)
 
     var isScanning by mutableStateOf(false)
         private set
@@ -69,6 +77,34 @@ class SpoolmanViewModel(application: Application) : AndroidViewModel(application
         baseUrl = normalized
         prefs.edit().putString("base_url", normalized).apply()
         api.updateBaseUrl(normalized)
+    }
+
+    fun updateTagStore(store: TagStore) {
+        tagStore = store
+        tagMoveLogs = emptyList()
+        prefs.edit().putString("tag_store", store.name).apply()
+        api.tagStore = store
+        // Spool responses carry both stores, so loaded spools only need re-reading.
+        for (i in spools.indices) spools[i] = spools[i].forStore(store)
+        for (i in scanHistory.indices) {
+            scanHistory[i] = scanHistory[i].withSpoolResponse(scanHistory[i].spoolResponse?.forStore(store))
+        }
+        lastResult = lastResult?.let { it.withSpoolResponse(it.spoolResponse?.forStore(store)) }
+    }
+
+    fun moveTagsToSelectedStore() {
+        if (isMovingTags) return
+        isMovingTags = true
+        tagMoveLogs = emptyList()
+        viewModelScope.launch {
+            tagMoveLogs = try {
+                api.migrateTags(tagStore)
+            } catch (e: Exception) {
+                listOf("✗ ${e.message ?: "Unable to move links"}")
+            }
+            isMovingTags = false
+            fetchSpools(reset = true)
+        }
     }
 
     fun savedNameStyle(): FilamentNameStyle =
@@ -136,8 +172,7 @@ class SpoolmanViewModel(application: Application) : AndroidViewModel(application
     fun removeTag(uidHex: String, spool: SpoolResponse) {
         viewModelScope.launch {
             try {
-                val updatedUIDs = spool.tagUIDs.filter { it.uppercase() != uidHex.uppercase() }
-                api.updateSpoolCardUids(spool.id, updatedUIDs)
+                api.unlinkTag(spool, uidHex)
                 refreshSpool(spool.id)
                 if (lastResult?.spoolId == spool.id) {
                     lastResult = lastResult?.let {
@@ -153,7 +188,7 @@ class SpoolmanViewModel(application: Application) : AndroidViewModel(application
     fun removeAllTags(spool: SpoolResponse) {
         viewModelScope.launch {
             try {
-                api.updateSpoolCardUids(spool.id, emptyList())
+                api.unlinkAllTags(spool)
                 refreshSpool(spool.id)
                 if (lastResult?.spoolId == spool.id) {
                     lastResult = lastResult?.let {
@@ -306,21 +341,16 @@ class SpoolmanViewModel(application: Application) : AndroidViewModel(application
         statusMessage = "Fetching spool $spoolId…"
         try {
             val spool = api.getSpool(spoolId)
-            val currentUIDs = spool.tagUIDs
-            val updatedUIDs = if (currentUIDs.contains(uidHex)) currentUIDs else currentUIDs + uidHex
 
             statusMessage = "Updating spool…"
-            api.updateSpoolCardUids(spoolId, updatedUIDs)
+            api.linkTag(spool, uidHex)?.let { refreshSpool(it) }
 
             statusMessage = "Cleaning up other spools…"
             val matching = api.findSpoolsByCardUid(uidHex)
             for (other in matching) {
                 if (other.id == spoolId) continue
-                val cleaned = other.tagUIDs.filter { it != uidHex }
-                if (cleaned.size != other.tagUIDs.size) {
-                    api.updateSpoolCardUids(other.id, cleaned)
-                    refreshSpool(other.id)
-                }
+                api.unlinkTag(other, uidHex)
+                refreshSpool(other.id)
             }
 
             val updatedSpool = refreshSpool(spoolId) ?: spool
@@ -355,18 +385,13 @@ class SpoolmanViewModel(application: Application) : AndroidViewModel(application
     suspend fun processAssignment(spool: SpoolResponse, uidHex: String, tagPayload: NFCTagPayload) {
         statusMessage = "Assigning tag to ${spool.displayName}…"
         try {
-            val currentUIDs = spool.tagUIDs
-            val updatedUIDs = if (currentUIDs.contains(uidHex)) currentUIDs else currentUIDs + uidHex
-            api.updateSpoolCardUids(spool.id, updatedUIDs)
+            api.linkTag(spool, uidHex)?.let { refreshSpool(it) }
 
             val matching = api.findSpoolsByCardUid(uidHex)
             for (other in matching) {
                 if (other.id == spool.id) continue
-                val cleaned = other.tagUIDs.filter { it != uidHex }
-                if (cleaned.size != other.tagUIDs.size) {
-                    api.updateSpoolCardUids(other.id, cleaned)
-                    refreshSpool(other.id)
-                }
+                api.unlinkTag(other, uidHex)
+                refreshSpool(other.id)
             }
 
             val updatedSpool = refreshSpool(spool.id) ?: spool
@@ -418,6 +443,7 @@ class SpoolmanViewModel(application: Application) : AndroidViewModel(application
         isCreatingSpool = true
         statusMessage = "Creating spool…"
         try {
+            api.requireTagStoreSupport()
             val meta = overrideMeta ?: tagPayload.filamentMetadata
             val nameStyle = savedNameStyle()
             val filamentId = if (selectedFilamentId != null) {
@@ -465,7 +491,8 @@ class SpoolmanViewModel(application: Application) : AndroidViewModel(application
                 scanHistory[idx] = updated
                 lastResult = updated
             }
-            if (spools.isNotEmpty()) refreshSpool(newSpool.id)
+            // Reloaded rather than refreshed: linking a native tag may have taken it from a listed spool.
+            if (spools.isNotEmpty()) fetchSpools(reset = true)
         } catch (e: Exception) {
             statusMessage = "Error creating spool: ${e.message}"
         }

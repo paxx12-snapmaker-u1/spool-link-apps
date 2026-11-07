@@ -6,6 +6,8 @@ package dev.pages.paxx12.spoollink.utils
 
 import dev.pages.paxx12.spoollink.model.FilamentMetadata
 import dev.pages.paxx12.spoollink.model.FilamentNameStyle
+import dev.pages.paxx12.spoollink.model.SpoolResponse
+import dev.pages.paxx12.spoollink.model.TagStore
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -42,16 +44,32 @@ class FilamentMetadataTest {
     }
 
     @Test
-    fun `tagUIDs parsed from lotNr`() {
-        val spool = dev.pages.paxx12.spoollink.model.SpoolResponse(
+    fun `tagUIDs read only the selected store`() {
+        val spool = SpoolResponse(
             id = 1,
-            filament = dev.pages.paxx12.spoollink.model.SpoolResponse.FilamentResponse(
-                1, null, null, null, null, null, null, null, null
-            ),
-            lotNr = "card_uid:AABBCCDD,card_uid:11223344,other",
-            remainingWeight = null, archived = false, registered = null, lastUsed = null
+            filament = SpoolResponse.FilamentResponse(1, null, null, null, null, null, null, null, null),
+            remainingWeight = null, archived = false, registered = null, lastUsed = null,
+            extra = SpoolResponse.ExtraData("\"AABBCCDD,11223344\""),
+            tags = listOf(SpoolResponse.SpoolTag("04a1b2"))
         )
-        assertEquals(listOf("AABBCCDD", "11223344"), spool.tagUIDs)
-        assertEquals(2, spool.tagCount)
+        assertEquals(listOf("AABBCCDD", "11223344"), spool.forStore(TagStore.CARD_UIDS).tagUIDs)
+        assertEquals(2, spool.forStore(TagStore.CARD_UIDS).tagCount)
+        assertEquals(listOf("04A1B2"), spool.forStore(TagStore.NATIVE).tagUIDs)
+    }
+
+    @Test
+    fun `native tags need Spoolman 0_27_0`() {
+        assertTrue(TagStore.supportsNativeTags("0.27.0"))
+        assertTrue(TagStore.supportsNativeTags("v0.27.1-rc1"))
+        assertTrue(TagStore.supportsNativeTags("1.0.0"))
+        assertFalse(TagStore.supportsNativeTags("0.26.1"))
+        assertFalse(TagStore.supportsNativeTags("dev"))
+    }
+
+    @Test
+    fun `tag store defaults to card_uids`() {
+        assertEquals(TagStore.CARD_UIDS, TagStore.fromName(null))
+        assertEquals(TagStore.CARD_UIDS, TagStore.fromName("bogus"))
+        assertEquals(TagStore.NATIVE, TagStore.fromName("NATIVE"))
     }
 }

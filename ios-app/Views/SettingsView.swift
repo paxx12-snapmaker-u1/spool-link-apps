@@ -10,12 +10,14 @@ struct SettingsView: View {
 
     @AppStorage("spoolmanBaseURL") private var savedURL = "http://spoolman.local:7912"
     @AppStorage("filamentNameStyle") private var nameStyle: FilamentNameStyle = .brandAndSubtype
+    @AppStorage(TagStore.defaultsKey) private var tagStore: TagStore = .cardUids
     @State private var tempURL = ""
     @State private var isTesting = false
     @State private var testResult: TestResult?
     @State private var testLogs: [String] = []
     @State private var showSavedFeedback = false
     @State private var presets = FilamentPresets.load()
+    @State private var showMoveTagsConfirm = false
 
     private enum TestResult {
         case success
@@ -111,6 +113,61 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    Picker("Store tags in", selection: $tagStore) {
+                        ForEach(TagStore.allCases, id: \.self) { store in
+                            Text(store.displayName).tag(store)
+                        }
+                    }
+                    .onChange(of: tagStore) {
+                        testResult = nil
+                        testLogs = []
+                        viewModel?.tagMoveLogs = []
+                        viewModel?.fetchSpools(reset: true)
+                    }
+
+                    Button {
+                        showMoveTagsConfirm = true
+                    } label: {
+                        HStack {
+                            Text("Move existing links here")
+                            if viewModel?.isMovingTags == true {
+                                Spacer()
+                                ProgressView()
+                            }
+                        }
+                    }
+                    .disabled(viewModel == nil || viewModel?.isMovingTags == true)
+
+                    if let logs = viewModel?.tagMoveLogs, !logs.isEmpty {
+                        VStack(alignment: .leading, spacing: 3) {
+                            ForEach(Array(logs.enumerated()), id: \.offset) { _, line in
+                                Text(line)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(
+                                        line.hasPrefix("✗") ? Color.red :
+                                        line.hasPrefix("✓") ? Color.green :
+                                        Color.secondary
+                                    )
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 4)
+                    }
+                } header: {
+                    Text("Tag Storage")
+                } footer: {
+                    Text("Must match Spoolman Tag Storage in the printer's firmware-config. Native tags need Spoolman v0.27.0 or newer. Picking a store does not move links; switching the printer's setting does, or use Move existing links here.")
+                }
+                .alert("Move Existing Links", isPresented: $showMoveTagsConfirm) {
+                    Button("Move Links") {
+                        Task { await viewModel?.moveTagsToSelectedStore() }
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("Move every tag link on this Spoolman server to \(tagStore.displayName) and clear them from the other store? The printer stops finding spools until its Spoolman Tag Storage setting matches. A card that can't be moved stays where it is and is listed here.")
+                }
+
+                Section {
                     Picker("Filament name", selection: $nameStyle) {
                         ForEach(FilamentNameStyle.allCases, id: \.self) { style in
                             Text(style.rawValue).tag(style)
@@ -203,7 +260,7 @@ struct SettingsView: View {
         testResult = nil
         testLogs = []
         Task {
-            let result = await SpoolmanAPI.testConnection(baseURL: tempURL)
+            let result = await SpoolmanAPI.testConnection(baseURL: tempURL, store: tagStore)
             testLogs = result.logs
             testResult = result.succeeded ? .success : .failure(result.error?.localizedDescription ?? "Unknown error")
             isTesting = false

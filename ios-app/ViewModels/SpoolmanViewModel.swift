@@ -20,6 +20,8 @@ class SpoolmanViewModel: NFCManagerDelegate {
     var availableFilaments: [SpoolmanAPI.FilamentResponse] = []
     var isLoadingFilaments = false
     var filamentsErrorMessage: String?
+    var isMovingTags = false
+    var tagMoveLogs: [String] = []
     private var spoolsOffset = 0
     private let spoolsPageSize = 20
 
@@ -34,6 +36,22 @@ class SpoolmanViewModel: NFCManagerDelegate {
 
     func updateBaseURL(_ url: String) {
         Task { await api.updateBaseURL(url) }
+    }
+
+    private var tagStore: TagStore { TagStore.current }
+
+    @MainActor
+    func moveTagsToSelectedStore() async {
+        guard !isMovingTags else { return }
+        isMovingTags = true
+        tagMoveLogs = []
+        do {
+            tagMoveLogs = try await api.migrateTags(to: tagStore)
+        } catch {
+            tagMoveLogs = ["✗ \(error.localizedDescription)"]
+        }
+        isMovingTags = false
+        fetchSpools(reset: true)
     }
 
     // MARK: - Spool list
@@ -95,7 +113,7 @@ class SpoolmanViewModel: NFCManagerDelegate {
 
     @MainActor
     func removeAllTags(from spool: SpoolResponse) async {
-        try? await api.updateSpoolCardUids(id: spool.id, uids: [])
+        try? await api.unlinkAllTags(from: spool, store: tagStore)
         await refreshSpool(id: spool.id)
         if let result = lastResult, result.spoolId == spool.id {
             lastResult = ScanResult(
@@ -111,8 +129,7 @@ class SpoolmanViewModel: NFCManagerDelegate {
 
     @MainActor
     func removeTag(uidHex: String, from spool: SpoolResponse) async {
-        let updatedUIDs = spool.tagUIDs.filter { $0.uppercased() != uidHex.uppercased() }
-        try? await api.updateSpoolCardUids(id: spool.id, uids: updatedUIDs)
+        try? await api.unlinkTag(from: spool, uid: uidHex, store: tagStore)
         await refreshSpool(id: spool.id)
         if let result = lastResult, result.spoolId == spool.id {
             lastResult = ScanResult(
@@ -160,6 +177,7 @@ class SpoolmanViewModel: NFCManagerDelegate {
         statusMessage = "Creating spool…"
         defer { isCreatingSpool = false }
         do {
+            try await api.requireTagStoreSupport(store: tagStore)
             let newSpool: SpoolResponse
             if let meta = overrideMeta ?? tagPayload?.filamentMetadata {
                 let styleRaw = UserDefaults.standard.string(forKey: "filamentNameStyle") ?? ""
@@ -188,7 +206,8 @@ class SpoolmanViewModel: NFCManagerDelegate {
                 }
                 newSpool = try await api.createSpoolFromInfo(
                     filamentId: filamentId,
-                    cardUid: uidHex.isEmpty ? nil : uidHex
+                    cardUid: uidHex.isEmpty ? nil : uidHex,
+                    store: tagStore
                 )
             } else {
                 statusMessage = "Missing filament details"
@@ -274,7 +293,7 @@ class SpoolmanViewModel: NFCManagerDelegate {
     @MainActor
     func processTag(payload: any NFCTagPayload, uidHex: String) async {
         guard let spoolId = payload.spoolId else {
-            let foundSpool = try? await api.findSpoolsByCardUid(uidHex).first
+            let foundSpool = try? await api.findSpoolsByCardUid(uidHex, store: tagStore).first
             let result = ScanResult(
                 spoolId: foundSpool?.id,
                 spoolName: foundSpool?.displayName ?? payload.displayTitle,
@@ -296,20 +315,16 @@ class SpoolmanViewModel: NFCManagerDelegate {
             let spool = try await api.getSpool(id: spoolId)
             let spoolName = spool.displayName
 
-            let currentUIDs = spool.tagUIDs
-            let updatedUIDs = currentUIDs.contains(uidHex) ? currentUIDs : currentUIDs + [uidHex]
-
             statusMessage = "Updating spool…"
-            try await api.updateSpoolCardUids(id: spoolId, uids: updatedUIDs)
+            if let holder = try await api.linkTag(to: spool, uid: uidHex, store: tagStore) {
+                await refreshSpool(id: holder)
+            }
 
             statusMessage = "Cleaning up other spools…"
-            let matchingSpools = try await api.findSpoolsByCardUid(uidHex)
+            let matchingSpools = try await api.findSpoolsByCardUid(uidHex, store: tagStore)
             for otherSpool in matchingSpools where otherSpool.id != spoolId {
-                let cleaned = otherSpool.tagUIDs.filter { $0 != uidHex }
-                if cleaned.count != otherSpool.tagUIDs.count {
-                    try await api.updateSpoolCardUids(id: otherSpool.id, uids: cleaned)
-                    await refreshSpool(id: otherSpool.id)
-                }
+                try await api.unlinkTag(from: otherSpool, uid: uidHex, store: tagStore)
+                await refreshSpool(id: otherSpool.id)
             }
 
             let updatedSpool = await refreshSpool(id: spoolId) ?? spool
@@ -346,17 +361,14 @@ class SpoolmanViewModel: NFCManagerDelegate {
         statusMessage = "Assigning tag to \(spool.displayName)…"
 
         do {
-            let currentUIDs = spool.tagUIDs
-            let updatedUIDs = currentUIDs.contains(uidHex) ? currentUIDs : currentUIDs + [uidHex]
-            try await api.updateSpoolCardUids(id: spool.id, uids: updatedUIDs)
+            if let holder = try await api.linkTag(to: spool, uid: uidHex, store: tagStore) {
+                await refreshSpool(id: holder)
+            }
 
-            let matchingSpools = try await api.findSpoolsByCardUid(uidHex)
+            let matchingSpools = try await api.findSpoolsByCardUid(uidHex, store: tagStore)
             for otherSpool in matchingSpools where otherSpool.id != spool.id {
-                let cleaned = otherSpool.tagUIDs.filter { $0 != uidHex }
-                if cleaned.count != otherSpool.tagUIDs.count {
-                    try await api.updateSpoolCardUids(id: otherSpool.id, uids: cleaned)
-                    await refreshSpool(id: otherSpool.id)
-                }
+                try await api.unlinkTag(from: otherSpool, uid: uidHex, store: tagStore)
+                await refreshSpool(id: otherSpool.id)
             }
 
             let updatedSpool = await refreshSpool(id: spool.id) ?? spool
