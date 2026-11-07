@@ -8,13 +8,35 @@ import dev.pages.paxx12.spoollink.model.SpoolResponse
 import com.google.gson.annotations.SerializedName
 import okhttp3.RequestBody
 import okhttp3.ResponseBody
+import retrofit2.Response
 import retrofit2.http.*
 
 data class VendorResponse(val id: Int, val name: String?)
 data class FilamentIdResponse(val id: Int)
 data class FieldResponse(val key: String)
+data class InfoResponse(val version: String?)
+data class TagConflictResponse(
+    val message: String?,
+    @SerializedName("spool_id") val spoolId: Int?
+)
 
 interface SpoolmanService {
+    @GET("api/v1/info")
+    suspend fun fetchInfo(): InfoResponse
+
+    @GET("api/v1/spool")
+    suspend fun findSpoolsByTag(
+        @Query("tag") uid: String,
+        @Query("limit") limit: Int,
+        @Query("allow_archived") allowArchived: Boolean
+    ): List<SpoolResponse>
+
+    @POST("api/v1/spool/{id}/tag")
+    suspend fun linkTag(@Path("id") id: Int, @Body body: RequestBody): ResponseBody
+
+    @DELETE("api/v1/spool/{id}/tag/{uid}")
+    suspend fun unlinkTag(@Path("id") id: Int, @Path("uid") uid: String): Response<ResponseBody>
+
     @GET("api/v1/spool")
     suspend fun fetchSpools(
         @Query("limit") limit: Int,

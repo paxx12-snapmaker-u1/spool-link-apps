@@ -92,15 +92,19 @@ matched spool (if any), and timestamp.
 
 ## Settings
 
-Spoolman server URL with a connection test, filament name pattern for new spools, and
+Spoolman server URL with a connection test, tag storage, filament name pattern for new spools, and
 editable presets for brands, materials, and variants.
+
+**Tag Storage** selects where tag links are kept: **Card UIDs** (the default) or **Spoolman native
+tags** (Spoolman v0.27.0 or newer). Use the same setting as **Spoolman Tag Storage** on the printer.
+Changing it here does not move existing links; switching the printer's setting does.
 
 <a href="images/android/13-settings.png"><img src="images/android/13-settings.png" alt="Settings" height="520" /></a>
 
 ## Settings — Connection Test
 
 Tapping **Test Connection** validates the server URL by running a sequence of API checks
-(info endpoint, `card_uids` field, filament field). On success a **Save** button appears
+(info endpoint, `card_uids` field or native tag support, filament field). On success a **Save** button appears
 to persist the URL.
 
 <a href="images/android/14-settings-connection-ok.png"><img src="images/android/14-settings-connection-ok.png" alt="Settings connection test" height="520" /></a>

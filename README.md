@@ -12,8 +12,10 @@ other applications from the relevant app marketplaces.
 1. Scan any NFC tag — blank tags and OpenSpool-format tags are both supported.
 2. Assign the tag to an existing Spoolman spool, or create a new one. If the tag carries
    OpenSpool data, the filament fields are pre-filled automatically.
-3. The card's UID is appended to the spool's `card_uids` custom field in Spoolman, and
-   removed from any other spool it was previously linked to.
+3. The card's UID is linked to the spool in Spoolman, and removed from any other spool it was
+   previously linked to. Links are stored in the `card_uids` custom field by default, or as Spoolman
+   native tags (v0.27.0 or newer) when selected under **Settings → Tag Storage**. Use the same
+   setting as **Spoolman Tag Storage** on the printer, which reads only that store.
 
 A tag can be reassigned or unlinked at any time by scanning it again. Spools work best
 with two tags — one on each side — so the spool is detected regardless of orientation.
@@ -38,6 +40,7 @@ Only the Android and iOS apps are properly tested; the web app is currently not 
 | Scan tag | Yes | Yes | Yes |
 | Read OpenSpool format | Yes | Yes | Yes |
 | Create and assign spool | Yes | Yes | Yes |
+| Spoolman native tags | Yes | Yes | Yes |
 | Requires HTTPS + CORS | No | No | Yes |
 | Requires paid developer certificate | No | Yes (NFC entitlement) | No |
 

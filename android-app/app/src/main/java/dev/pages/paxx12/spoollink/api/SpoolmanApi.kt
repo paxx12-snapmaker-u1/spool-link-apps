@@ -5,6 +5,7 @@
 package dev.pages.paxx12.spoollink.api
 
 import dev.pages.paxx12.spoollink.model.SpoolResponse
+import dev.pages.paxx12.spoollink.model.TagStore
 import com.google.gson.Gson
 import com.google.gson.JsonObject
 import kotlinx.coroutines.Dispatchers
@@ -13,12 +14,15 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import retrofit2.HttpException
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
+import java.io.IOException
 import java.util.concurrent.TimeUnit
 
-class SpoolmanApi(baseUrl: String) {
+class SpoolmanApi(baseUrl: String, var tagStore: TagStore = TagStore.CARD_UIDS) {
     private var normalizedUrl = normalizeUrl(baseUrl)
+    private var nativeTagsConfirmed = false
     private val gson = Gson()
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(REQUEST_TIMEOUT_SECONDS, TimeUnit.SECONDS)
@@ -31,6 +35,7 @@ class SpoolmanApi(baseUrl: String) {
     fun updateBaseUrl(newUrl: String) {
         normalizedUrl = normalizeUrl(newUrl)
         service = buildService(normalizedUrl)
+        nativeTagsConfirmed = false
     }
 
     private fun buildService(url: String): SpoolmanService = Retrofit.Builder()
@@ -41,17 +46,82 @@ class SpoolmanApi(baseUrl: String) {
         .create(SpoolmanService::class.java)
 
     suspend fun fetchSpools(limit: Int = 20, offset: Int = 0): List<SpoolResponse> =
-        withContext(Dispatchers.IO) { service.fetchSpools(limit, offset) }
+        withContext(Dispatchers.IO) { service.fetchSpools(limit, offset).map { it.forStore(tagStore) } }
 
     suspend fun getSpool(id: Int): SpoolResponse =
-        withContext(Dispatchers.IO) { service.getSpool(id) }
+        withContext(Dispatchers.IO) { service.getSpool(id).forStore(tagStore) }
 
     suspend fun findSpoolsByCardUid(uid: String): List<SpoolResponse> = withContext(Dispatchers.IO) {
-        val all = service.findSpoolsByCardUidCandidateSpools(limit = 1000, allowArchived = true)
-        all.filter { it.tagUIDs.contains(uid.uppercase()) }
+        val upper = uid.uppercase()
+        val candidates = if (tagStore == TagStore.NATIVE) {
+            service.findSpoolsByTag(upper, limit = 1000, allowArchived = true)
+        } else {
+            service.findSpoolsByCardUidCandidateSpools(limit = 1000, allowArchived = true)
+        }
+        // Filtered in both stores: Spoolman older than v0.27.0 ignores `tag` and returns every spool.
+        candidates.map { it.forStore(tagStore) }.filter { it.tagUIDs.contains(upper) }
     }
 
-    suspend fun updateSpoolCardUids(id: Int, uids: List<String>) = withContext(Dispatchers.IO) {
+    /** Throws when native tags are selected but this server has none. */
+    suspend fun requireTagStoreSupport() = withContext(Dispatchers.IO) {
+        if (tagStore != TagStore.NATIVE || nativeTagsConfirmed) return@withContext
+        val version = service.fetchInfo().version.orEmpty()
+        if (!TagStore.supportsNativeTags(version)) {
+            throw IOException("Native tags need Spoolman v0.27.0 or newer (server is ${version.ifEmpty { "unknown" }})")
+        }
+        nativeTagsConfirmed = true
+    }
+
+    /** Links the tag to the spool. Returns the id of another spool it had to be taken from, if any. */
+    suspend fun linkTag(spool: SpoolResponse, uid: String): Int? = withContext(Dispatchers.IO) {
+        val upper = uid.uppercase()
+        if (tagStore == TagStore.CARD_UIDS) {
+            if (upper !in spool.tagUIDs) updateSpoolCardUids(spool.id, spool.tagUIDs + upper)
+            return@withContext null
+        }
+        requireTagStoreSupport()
+        val body = gson.toJson(JsonObject().apply { addProperty("uid", upper) })
+            .toRequestBody("application/json".toMediaType())
+        try {
+            service.linkTag(spool.id, body)
+            null
+        } catch (e: HttpException) {
+            if (e.code() != 409) throw e
+            val conflict = runCatching {
+                gson.fromJson(e.response()?.errorBody()?.string(), TagConflictResponse::class.java)
+            }.getOrNull()
+            val holder = conflict?.spoolId
+            if (holder == null || holder == spool.id) {
+                throw IOException(conflict?.message ?: "Tag $upper is already linked")
+            }
+            deleteNativeTag(holder, upper)
+            service.linkTag(spool.id, body)
+            holder
+        }
+    }
+
+    suspend fun unlinkTag(spool: SpoolResponse, uid: String) = withContext(Dispatchers.IO) {
+        if (tagStore == TagStore.NATIVE) {
+            deleteNativeTag(spool.id, uid.uppercase())
+        } else {
+            updateSpoolCardUids(spool.id, spool.tagUIDs.filter { !it.equals(uid, ignoreCase = true) })
+        }
+    }
+
+    suspend fun unlinkAllTags(spool: SpoolResponse) = withContext(Dispatchers.IO) {
+        if (tagStore == TagStore.NATIVE) {
+            spool.tagUIDs.forEach { deleteNativeTag(spool.id, it) }
+        } else {
+            updateSpoolCardUids(spool.id, emptyList())
+        }
+    }
+
+    private suspend fun deleteNativeTag(spoolId: Int, uid: String) {
+        val response = service.unlinkTag(spoolId, uid)
+        if (!response.isSuccessful && response.code() != 404) throw HttpException(response)
+    }
+
+    private suspend fun updateSpoolCardUids(id: Int, uids: List<String>) {
         val obj = JsonObject()
         val extra = JsonObject()
         extra.addProperty("card_uids", jsonEncodeString(uids.joinToString(",")))
@@ -111,13 +181,23 @@ class SpoolmanApi(baseUrl: String) {
     ): SpoolResponse = withContext(Dispatchers.IO) {
         val spoolObj = JsonObject().apply {
             addProperty("filament_id", filamentId)
-            cardUid?.let {
-                val extra = JsonObject()
-                extra.addProperty("card_uids", jsonEncodeString(it))
-                add("extra", extra)
+            if (tagStore == TagStore.CARD_UIDS) {
+                cardUid?.let {
+                    val extra = JsonObject()
+                    extra.addProperty("card_uids", jsonEncodeString(it))
+                    add("extra", extra)
+                }
             }
         }
-        service.createSpool(gson.toJson(spoolObj).toRequestBody("application/json".toMediaType()))
+        val created = service.createSpool(
+            gson.toJson(spoolObj).toRequestBody("application/json".toMediaType())
+        ).forStore(tagStore)
+        if (tagStore == TagStore.NATIVE && cardUid != null) {
+            linkTag(created, cardUid)
+            getSpool(created.id)
+        } else {
+            created
+        }
     }
 
     private fun jsonEncodeString(value: String): String = gson.toJson(value)
@@ -144,7 +224,7 @@ class SpoolmanApi(baseUrl: String) {
             val succeeded: Boolean
         )
 
-        suspend fun testConnection(baseUrl: String): ConnectionTestResult = withContext(Dispatchers.IO) {
+        suspend fun testConnection(baseUrl: String, tagStore: TagStore): ConnectionTestResult = withContext(Dispatchers.IO) {
             val logs = mutableListOf<String>()
             val normalized = normalizeUrl(baseUrl)
             val infoUrl = "${normalized}api/v1/info"
@@ -187,6 +267,11 @@ class SpoolmanApi(baseUrl: String) {
                     ?.asString
                     ?.let { detail += " $it" }
                 logs.add("✓ $detail")
+                if (tagStore == TagStore.NATIVE && !TagStore.supportsNativeTags(version)) {
+                    val message = "Native tags need Spoolman v0.27.0 or newer"
+                    logs.add("✗ $message")
+                    return@withContext ConnectionTestResult(logs, message, false)
+                }
             } catch (e: Exception) {
                 logs.add("✗ ${e.message ?: "Unknown error"}")
                 return@withContext ConnectionTestResult(logs, e.message, false)
@@ -236,7 +321,7 @@ class SpoolmanApi(baseUrl: String) {
                     logs.add("⚠ custom fields check failed: ${e.message ?: "Unknown error"}")
                 }
             }
-            ensureField("spool", "card_uids", "Card UIDs")
+            if (tagStore == TagStore.CARD_UIDS) ensureField("spool", "card_uids", "Card UIDs")
             ensureField("filament", "variant", "Variant")
 
             ConnectionTestResult(logs, null, true)

@@ -10,6 +10,7 @@ struct SettingsView: View {
 
     @AppStorage("spoolmanBaseURL") private var savedURL = "http://spoolman.local:7912"
     @AppStorage("filamentNameStyle") private var nameStyle: FilamentNameStyle = .brandAndSubtype
+    @AppStorage(TagStore.defaultsKey) private var tagStore: TagStore = .cardUids
     @State private var tempURL = ""
     @State private var isTesting = false
     @State private var testResult: TestResult?
@@ -111,6 +112,23 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    Picker("Store tags in", selection: $tagStore) {
+                        ForEach(TagStore.allCases, id: \.self) { store in
+                            Text(store.displayName).tag(store)
+                        }
+                    }
+                    .onChange(of: tagStore) {
+                        testResult = nil
+                        testLogs = []
+                        viewModel?.fetchSpools(reset: true)
+                    }
+                } header: {
+                    Text("Tag Storage")
+                } footer: {
+                    Text("Must match Spoolman Tag Storage in the printer's firmware-config. Native tags need Spoolman v0.27.0 or newer. Changing this does not move existing links; switching the printer's setting does.")
+                }
+
+                Section {
                     Picker("Filament name", selection: $nameStyle) {
                         ForEach(FilamentNameStyle.allCases, id: \.self) { style in
                             Text(style.rawValue).tag(style)
@@ -203,7 +221,7 @@ struct SettingsView: View {
         testResult = nil
         testLogs = []
         Task {
-            let result = await SpoolmanAPI.testConnection(baseURL: tempURL)
+            let result = await SpoolmanAPI.testConnection(baseURL: tempURL, store: tagStore)
             testLogs = result.logs
             testResult = result.succeeded ? .success : .failure(result.error?.localizedDescription ?? "Unknown error")
             isTesting = false

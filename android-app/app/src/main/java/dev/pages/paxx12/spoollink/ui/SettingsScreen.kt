@@ -27,6 +27,7 @@ import androidx.compose.ui.unit.dp
 import dev.pages.paxx12.spoollink.api.SpoolmanApi
 import dev.pages.paxx12.spoollink.model.FilamentNameStyle
 import dev.pages.paxx12.spoollink.model.FilamentPresets
+import dev.pages.paxx12.spoollink.model.TagStore
 import dev.pages.paxx12.spoollink.viewmodel.SpoolmanViewModel
 import kotlinx.coroutines.launch
 
@@ -41,6 +42,7 @@ fun SettingsScreen(viewModel: SpoolmanViewModel) {
     var nameStyle by remember { mutableStateOf(viewModel.savedNameStyle()) }
     var showStyleMenu by remember { mutableStateOf(false) }
     var storeRawTags by remember { mutableStateOf(viewModel.savedStoreRawTags()) }
+    var showTagStoreMenu by remember { mutableStateOf(false) }
 
     var presetsEditorTarget by remember { mutableStateOf<String?>(null) }
 
@@ -75,7 +77,7 @@ fun SettingsScreen(viewModel: SpoolmanViewModel) {
                             focusManager.clearFocus()
                             scope.launch {
                                 isTesting = true; testLogs = emptyList(); testPassed = false
-                                val result = SpoolmanApi.testConnection(tempUrl)
+                                val result = SpoolmanApi.testConnection(tempUrl, viewModel.tagStore)
                                 testLogs = result.logs; testPassed = result.succeeded
                                 isTesting = false
                             }
@@ -151,6 +153,53 @@ fun SettingsScreen(viewModel: SpoolmanViewModel) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant, fontFamily = FontFamily.Monospace)
                 }
             }
+        }
+
+        item {
+            SectionHeader("Tag Storage")
+            Surface(Modifier.fillMaxWidth().padding(horizontal = 16.dp), shape = RoundedCornerShape(12.dp), tonalElevation = 2.dp) {
+                Box {
+                    Row(
+                        Modifier.fillMaxWidth().clickable { showTagStoreMenu = true }.padding(16.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Store tags in", style = MaterialTheme.typography.bodyMedium)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(viewModel.tagStore.displayName, style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Icon(Icons.Default.ArrowDropDown, contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                    DropdownMenu(expanded = showTagStoreMenu, onDismissRequest = { showTagStoreMenu = false }) {
+                        TagStore.entries.forEach { store ->
+                            DropdownMenuItem(
+                                text = {
+                                    Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                                        Text(store.displayName)
+                                        if (viewModel.tagStore == store) {
+                                            Icon(Icons.Default.Check, contentDescription = null,
+                                                modifier = Modifier.size(16.dp))
+                                        }
+                                    }
+                                },
+                                onClick = {
+                                    viewModel.updateTagStore(store)
+                                    testLogs = emptyList(); testPassed = false
+                                    showTagStoreMenu = false
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+            Text("Must match Spoolman Tag Storage in the printer's firmware-config. Native tags need " +
+                "Spoolman v0.27.0 or newer. Changing this does not move existing links; " +
+                "switching the printer's setting does.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 28.dp))
         }
 
         item {

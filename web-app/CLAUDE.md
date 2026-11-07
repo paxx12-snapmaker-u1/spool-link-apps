@@ -32,11 +32,11 @@ web-app/
 
 | Function | What it does |
 |---|---|
-| `processTag(payload, uidHex)` | Core sync: update current spool's `card_uids`, clean others — mirrors `SpoolmanViewModel.processTag` |
+| `processTag(payload, uidHex)` | Core sync: link tag to current spool, clean others — mirrors `SpoolmanViewModel.processTag` |
 | `processAssignment(spool, uidHex, payload)` | Assign tag to specific spool — mirrors `processAssignment` |
 | `createSpoolFromTag(uidHex, payload, meta)` | Vendor find-or-create → filament create → spool create |
-| `removeTag(spool, uidHex)` | Strip one UID from `extra.card_uids` |
-| `removeAllTags(spool)` | Strip all UIDs from `extra.card_uids` |
+| `removeTag(spool, uidHex)` | Unlink one UID from the selected store |
+| `removeAllTags(spool)` | Unlink all UIDs from the selected store |
 | `fetchSpools(reset)` | Paginated spool list (page size 20) |
 | `tagFields(payload)` | Extract `{ label, value, colorHex? }` fields from a tag payload for display |
 | `renderTagDetailTable(payload, uidHex)` | Build the tag detail DOM table using `tagFields()` |
@@ -57,12 +57,13 @@ Spoolman API returns snake_case JSON. Key fields:
 - `spool.remaining_weight` — grams, may be null
 - `spool.registered`, `spool.last_used` — ISO 8601 strings
 
-Helper `spoolTagUIDs(spool)` returns `string[]` of UID hex strings parsed from `extra.card_uids`.
+Helper `spoolTagUIDs(spool)` returns `string[]` of UID hex strings from the selected store (`Settings.tagStore`):
+`extra.card_uids` or, for `native`, `spool.tags[].uid`.
 
 ## card_uids Field
 
-UIDs are stored in `spool.extra.card_uids` as a Spoolman custom field. The value is JSON-encoded
-(double-serialized) as required by the custom field API:
+In the `card_uids` store, UIDs are stored in `spool.extra.card_uids` as a Spoolman custom field. The value is
+JSON-encoded (double-serialized) as required by the custom field API:
 
 ```js
 body: JSON.stringify({ extra: { card_uids: JSON.stringify(uids.join(',')) } })

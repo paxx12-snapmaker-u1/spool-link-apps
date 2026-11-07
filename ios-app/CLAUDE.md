@@ -40,14 +40,15 @@ To add a new tag format: implement `NFCTagPayload`, add a matching branch in `Ta
 
 ## card_uids Format
 
-Tag UIDs are stored in `spool.extra.cardUids` (decoded from `extra.card_uids`) as a comma-separated string
-of uppercase hex UIDs:
+In the `.cardUids` store, tag UIDs are stored in `spool.extra.cardUids` (decoded from `extra.card_uids`) as a
+comma-separated string of uppercase hex UIDs:
 
 ```
 "AABBCCDD,11223344"
 ```
 
-`SpoolResponse.tagUIDs` splits on `,` and filters empty strings. `tagCount` is `tagUIDs.count`. The field
+`SpoolResponse.tagUIDs` splits on `,` and filters empty strings, or reads `tags` in the `.native` store
+(`TagStore.current`). `tagCount` is `tagUIDs.count`. The field
 value itself is JSON-encoded (double-serialized string) as required by Spoolman's custom field API —
 `SpoolmanAPI` handles this encoding/decoding transparently.
 
@@ -101,6 +102,8 @@ meta.filamentName(style: nameStyle)
 - `actor` — all mutations are safe; call with `await`.
 - Uses `convertToSnakeCase` encoder and `convertFromSnakeCase` decoder consistently for server I/O.
 - `findOrCreateVendor(name:)` — use before `createSpoolFromInfo` when brand is non-nil.
+- `linkTag(to:uid:store:)`, `unlinkTag(from:uid:store:)`, `unlinkAllTags(from:store:)` — all tag writes; the ViewModel
+  passes `TagStore.current`.
 - Do not add view logic or `UserDefaults` reads here; those belong in the ViewModel.
 
 ## Sheets and State in `ScanView`
@@ -117,6 +120,7 @@ meta.filamentName(style: nameStyle)
 Use `@AppStorage` in views for user preferences. Current keys:
 
 - `"spoolmanBaseURL"` — server URL
+- `"tagStore"` — raw value of `TagStore`
 - `"filamentNameStyle"` — raw value of `FilamentNameStyle`
 - `"spoolsSortBy"` — raw value of `SpoolSort` (persisted in `SpoolsView`)
 - `"spoolsSortAscending"` — `Bool` sort direction (persisted in `SpoolsView`)

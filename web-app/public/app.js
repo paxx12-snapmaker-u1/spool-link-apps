@@ -9,7 +9,10 @@ class SpoolmanAPI {
     this.baseURL = normalizeURL(baseURL);
   }
 
-  setBaseURL(url) { this.baseURL = normalizeURL(url); }
+  setBaseURL(url) {
+    this.baseURL = normalizeURL(url);
+    this.nativeTagsConfirmed = false;
+  }
 
   async fetchSpools(limit = 20, offset = 0) {
     const url = new URL(`${this.baseURL}api/v1/spool`);
@@ -31,10 +34,76 @@ class SpoolmanAPI {
     const url = new URL(`${this.baseURL}api/v1/spool`);
     url.searchParams.set('limit', 1000);
     url.searchParams.set('allow_archived', true);
+    if (Settings.tagStore === 'native') url.searchParams.set('tag', uid.toUpperCase());
     const res = await fetch(url);
     if (!res.ok) throw new Error(`Server error: ${res.status}`);
     const all = await res.json();
+    // Filtered in both stores: Spoolman older than v0.27.0 ignores `tag` and returns every spool.
     return all.filter(spool => spoolTagUIDs(spool).includes(uid.toUpperCase()));
+  }
+
+  async requireTagStoreSupport() {
+    if (Settings.tagStore !== 'native' || this.nativeTagsConfirmed) return;
+    const res = await fetch(`${this.baseURL}api/v1/info`);
+    if (!res.ok) throw new Error(`Server error: ${res.status}`);
+    const { version } = await res.json();
+    if (!supportsNativeTags(version)) {
+      throw new Error(`Native tags need Spoolman v0.27.0 or newer (server is ${version})`);
+    }
+    this.nativeTagsConfirmed = true;
+  }
+
+  async postNativeTag(spoolId, uid) {
+    return fetch(`${this.baseURL}api/v1/spool/${spoolId}/tag`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ uid }),
+    });
+  }
+
+  async deleteNativeTag(spoolId, uid) {
+    const res = await fetch(`${this.baseURL}api/v1/spool/${spoolId}/tag/${uid}`, { method: 'DELETE' });
+    if (!res.ok && res.status !== 404) throw new Error(`Server error: ${res.status}`);
+  }
+
+  // Links the tag to the spool. Returns the id of another spool it had to be taken from, if any.
+  async linkTag(spool, uid) {
+    const upper = uid.toUpperCase();
+    if (Settings.tagStore !== 'native') {
+      const current = spoolTagUIDs(spool);
+      if (!current.includes(upper)) await this.updateSpoolCardUids(spool.id, [...current, upper]);
+      return null;
+    }
+    await this.requireTagStoreSupport();
+    let res = await this.postNativeTag(spool.id, upper);
+    if (res.ok) return null;
+    if (res.status !== 409) throw new Error(`Server error: ${res.status}`);
+    const conflict = await res.json().catch(() => null);
+    const holder = conflict?.spool_id;
+    if (holder == null || holder === spool.id) {
+      throw new Error(conflict?.message ?? `Tag ${upper} is already linked`);
+    }
+    await this.deleteNativeTag(holder, upper);
+    res = await this.postNativeTag(spool.id, upper);
+    if (!res.ok) throw new Error(`Server error: ${res.status}`);
+    return holder;
+  }
+
+  async unlinkTag(spool, uid) {
+    if (Settings.tagStore === 'native') {
+      await this.deleteNativeTag(spool.id, uid.toUpperCase());
+    } else {
+      const remaining = spoolTagUIDs(spool).filter(u => u.toUpperCase() !== uid.toUpperCase());
+      await this.updateSpoolCardUids(spool.id, remaining);
+    }
+  }
+
+  async unlinkAllTags(spool) {
+    if (Settings.tagStore === 'native') {
+      for (const uid of spoolTagUIDs(spool)) await this.deleteNativeTag(spool.id, uid);
+    } else {
+      await this.updateSpoolCardUids(spool.id, []);
+    }
   }
 
   async updateSpoolCardUids(id, uids) {
@@ -108,15 +177,21 @@ class SpoolmanAPI {
     if (!filRes.ok) throw new Error(`Server error: ${filRes.status}`);
     const filament = await filRes.json();
 
+    const native = Settings.tagStore === 'native';
     const body = { filament_id: filament.id };
-    if (cardUid) body.extra = { card_uids: JSON.stringify(cardUid) };
+    if (cardUid && !native) body.extra = { card_uids: JSON.stringify(cardUid) };
     const spoolRes = await fetch(`${this.baseURL}api/v1/spool`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
     if (!spoolRes.ok) throw new Error(`Server error: ${spoolRes.status}`);
-    return spoolRes.json();
+    const created = await spoolRes.json();
+    if (cardUid && native) {
+      await this.linkTag(created, cardUid);
+      return this.getSpool(created.id);
+    }
+    return created;
   }
 
   static async testConnection(baseURL) {
@@ -146,6 +221,12 @@ class SpoolmanAPI {
       if (info.db_type) detail += ` (${info.db_type})`;
       if (info.git_commit) detail += ` ${info.git_commit}`;
       logs.push(`✓ ${detail}`);
+
+      if (Settings.tagStore === 'native' && !supportsNativeTags(info.version)) {
+        const message = 'Native tags need Spoolman v0.27.0 or newer';
+        logs.push(`✗ ${message}`);
+        return { logs, error: message };
+      }
 
       async function ensureField(entityType, key, name) {
         const listURL = `${normalized}api/v1/field/${entityType}`;
@@ -186,7 +267,7 @@ class SpoolmanAPI {
         }
       }
 
-      await ensureField('spool', 'card_uids', 'Card UIDs');
+      if (Settings.tagStore !== 'native') await ensureField('spool', 'card_uids', 'Card UIDs');
       await ensureField('filament', 'variant', 'Variant');
 
       return { logs, error: null };
@@ -248,7 +329,15 @@ function spoolDisplayName(spool) {
   return parts.length ? parts.join(' – ') : 'Unnamed Spool';
 }
 
+function supportsNativeTags(version) {
+  const match = /^v?(\d+)\.(\d+)\.(\d+)/.exec(version ?? '');
+  return !!match && (parseInt(match[1]) > 0 || parseInt(match[2]) >= 27);
+}
+
 function spoolTagUIDs(spool) {
+  if (Settings.tagStore === 'native') {
+    return (spool.tags ?? []).map(t => t.uid?.toUpperCase()).filter(Boolean);
+  }
   const raw = spool.extra?.card_uids;
   if (!raw) return [];
   let decoded = raw;
@@ -438,6 +527,8 @@ const Settings = {
   set baseURL(v) { localStorage.setItem('spoolmanBaseURL', v); },
   get nameStyle() { return localStorage.getItem('filamentNameStyle') ?? 'brandAndSubtype'; },
   set nameStyle(v) { localStorage.setItem('filamentNameStyle', v); },
+  get tagStore() { return localStorage.getItem('tagStore') === 'native' ? 'native' : 'card_uids'; },
+  set tagStore(v) { localStorage.setItem('tagStore', v); },
   get presets() {
     const defaults = { brands: [], materials: ['PLA','PETG','ABS','ASA','TPU','Nylon','PC','PA'], variants: ['Basic','Matte','Silk','Glossy','Carbon Fiber'], weights: ['250','500','1000','2000'] };
     try { return { ...defaults, ...(JSON.parse(localStorage.getItem('filamentPresets') ?? 'null') ?? {}) }; }
@@ -466,7 +557,7 @@ const state = {
 };
 
 const api = new SpoolmanAPI(Settings.baseURL);
-api.ensureCardUidsFieldExists().catch(() => {});
+if (Settings.tagStore !== 'native') api.ensureCardUidsFieldExists().catch(() => {});
 
 // ─── NFC ─────────────────────────────────────────────────────────────────────
 
@@ -532,22 +623,17 @@ async function processTag(payload, uidHex) {
   updateStatus(`Fetching spool ${spoolId}…`);
   try {
     const spool = await api.getSpool(spoolId);
-    const currentUIDs = spoolTagUIDs(spool);
-    const updatedUIDs = currentUIDs.includes(uidHex) ? currentUIDs : [...currentUIDs, uidHex];
 
     updateStatus('Updating spool…');
-    await api.updateSpoolCardUids(spoolId, updatedUIDs);
+    const holder = await api.linkTag(spool, uidHex);
+    if (holder != null) refreshSpoolInState(holder);
 
     updateStatus('Cleaning up other spools…');
     const matches = await api.findSpoolsByCardUid(uidHex);
     for (const other of matches) {
       if (other.id === spoolId) continue;
-      const otherUIDs = spoolTagUIDs(other);
-      const cleaned = otherUIDs.filter(uid => uid !== uidHex);
-      if (cleaned.length !== otherUIDs.length) {
-        await api.updateSpoolCardUids(other.id, cleaned);
-        refreshSpoolInState(other.id);
-      }
+      await api.unlinkTag(other, uidHex);
+      refreshSpoolInState(other.id);
     }
 
     const updatedSpool = await refreshSpoolInState(spoolId) ?? spool;
@@ -587,20 +673,14 @@ async function processTag(payload, uidHex) {
 async function processAssignment(spool, uidHex, payload) {
   updateStatus(`Assigning tag to ${spoolDisplayName(spool)}…`);
   try {
-    const currentUIDs = spoolTagUIDs(spool);
-    const updatedUIDs = currentUIDs.includes(uidHex) ? currentUIDs : [...currentUIDs, uidHex];
-
-    await api.updateSpoolCardUids(spool.id, updatedUIDs);
+    const holder = await api.linkTag(spool, uidHex);
+    if (holder != null) refreshSpoolInState(holder);
 
     const matches = await api.findSpoolsByCardUid(uidHex);
     for (const other of matches) {
       if (other.id === spool.id) continue;
-      const otherUIDs = spoolTagUIDs(other);
-      const cleaned = otherUIDs.filter(uid => uid !== uidHex);
-      if (cleaned.length !== otherUIDs.length) {
-        await api.updateSpoolCardUids(other.id, cleaned);
-        refreshSpoolInState(other.id);
-      }
+      await api.unlinkTag(other, uidHex);
+      refreshSpoolInState(other.id);
     }
 
     const updatedSpool = await refreshSpoolInState(spool.id) ?? spool;
@@ -626,6 +706,7 @@ async function processAssignment(spool, uidHex, payload) {
 async function createSpoolFromTag(uidHex, payload, meta) {
   const nameStyle = Settings.nameStyle;
   try {
+    await api.requireTagStoreSupport();
     let vendorId = null;
     if (meta.brand) vendorId = await api.findOrCreateVendor(meta.brand);
     const name = meta.brand || meta.material ? filamentName(meta, nameStyle) : 'Custom Filament';
@@ -642,7 +723,8 @@ async function createSpoolFromTag(uidHex, payload, meta) {
       subtype: meta.subtype || null,
     });
     updateStatus(`Spool created: ${spoolDisplayName(newSpool)}`);
-    if (state.spools.length > 0) await refreshSpoolInState(newSpool.id);
+    // Reloaded rather than refreshed: linking a native tag may have taken it from a listed spool.
+    if (state.spools.length > 0) await fetchSpools(true);
     return newSpool;
   } catch (e) {
     updateStatus(`Error creating spool: ${e.message}`);
@@ -651,8 +733,7 @@ async function createSpoolFromTag(uidHex, payload, meta) {
 }
 
 async function removeTag(spool, uidHex) {
-  const updatedUIDs = spoolTagUIDs(spool).filter(u => u.toUpperCase() !== uidHex.toUpperCase());
-  await api.updateSpoolCardUids(spool.id, updatedUIDs);
+  await api.unlinkTag(spool, uidHex);
   await refreshSpoolInState(spool.id);
   if (state.lastResult?.spoolId === spool.id) {
     state.lastResult = { ...state.lastResult, spoolResponse: null, spoolId: null };
@@ -662,7 +743,7 @@ async function removeTag(spool, uidHex) {
 }
 
 async function removeAllTags(spool) {
-  await api.updateSpoolCardUids(spool.id, []);
+  await api.unlinkAllTags(spool);
   await refreshSpoolInState(spool.id);
   if (state.lastResult?.spoolId === spool.id) {
     state.lastResult = { ...state.lastResult, spoolResponse: null, spoolId: null };
@@ -1507,10 +1588,20 @@ function initSettings() {
   const urlInput = document.getElementById('input-url');
   const displayURL = document.getElementById('display-saved-url');
   const nameStyleSel = document.getElementById('select-name-style');
+  const tagStoreSel = document.getElementById('select-tag-store');
 
   urlInput.value = Settings.baseURL;
   displayURL.textContent = Settings.baseURL;
   nameStyleSel.value = Settings.nameStyle;
+  tagStoreSel.value = Settings.tagStore;
+
+  tagStoreSel.addEventListener('change', () => {
+    Settings.tagStore = tagStoreSel.value;
+    document.getElementById('test-logs').classList.add('hidden');
+    document.getElementById('btn-save-wrap').classList.add('hidden');
+    if (Settings.tagStore !== 'native') api.ensureCardUidsFieldExists().catch(() => {});
+    renderSpools();
+  });
 
   urlInput.addEventListener('input', () => {
     document.getElementById('test-logs').classList.add('hidden');

@@ -24,6 +24,9 @@ Default: `http://spoolman.local:7912/`
 | `GET` | `api/v1/spool/{id}` | Single spool by ID |
 | `GET` | `api/v1/spool?limit=1000&allow_archived=true` | Candidate spools for UID search (client-side filtered) |
 | `PATCH` | `api/v1/spool/{id}` | Update spool extra data (card UIDs) |
+| `GET` | `api/v1/spool?tag=&limit=1000&allow_archived=true` | Spools holding a native tag (native store only) |
+| `POST` | `api/v1/spool/{id}/tag` | Link a native tag (native store only) |
+| `DELETE` | `api/v1/spool/{id}/tag/{uid}` | Unlink a native tag (native store only) |
 | `POST` | `api/v1/spool` | Create new spool |
 | `GET` | `api/v1/filament?limit=&offset=` | Paginated filament list |
 | `POST` | `api/v1/filament` | Create new filament |
@@ -92,9 +95,85 @@ Default: `http://spoolman.local:7912/`
 
 ---
 
+## Tag Storage
+
+Tag links live in one of two stores, picked under **Settings → Tag Storage**:
+
+| Store | Where | Spoolman version |
+|-------|-------|------------------|
+| Card UIDs (default) | [`extra.card_uids`](#card_uids-custom-field) custom field | Any |
+| Spoolman native tags | [Native tags](#native-tags) | v0.27.0 or newer |
+
+The apps read and write only the selected store, with no fallback to the other. This matches the Snapmaker U1
+extended firmware, whose SpoolLink reads only its own `tag_store`, so the app setting must match the printer's
+**Spoolman Tag Storage** setting in firmware-config (hidden: open firmware-config with `?hidden` at the end of its
+URL). Changing the app setting moves nothing; switching the printer's setting migrates every link on the server.
+
+---
+
+## Native Tags
+
+Spoolman v0.27.0 and newer has NFC/RFID tags keyed on the hardware UID. A tag belongs to exactly one spool or
+filament, and Spoolman normalizes its UID to uppercase hex, the same form `card_uids` uses.
+
+Spool responses list linked tags in `tags`, which the `tagUIDs` helpers read in this store:
+
+```json
+{
+  "id": 42,
+  "tags": [{ "uid": "AABBCCDD", "added": "2026-11-07T08:27:36Z" }]
+}
+```
+
+### Link
+
+```
+POST api/v1/spool/{id}/tag
+{ "uid": "AABBCCDD" }
+```
+
+Returns `201`, also when the tag is already on this spool. When it is linked elsewhere, returns `409`:
+
+```json
+{ "message": "Tag AABBCCDD is already linked to spool 7.", "spool_id": 7, "filament_id": null }
+```
+
+With a `spool_id`, the apps unlink the tag from that spool and retry, which also covers archived spools. A tag held
+by a filament has no `spool_id`, so `message` is shown as an error instead of taking the tag from the filament.
+
+### Unlink
+
+```
+DELETE api/v1/spool/{id}/tag/{uid}
+```
+
+Returns `204`, or `404` when the spool does not hold the tag, which the apps treat as already unlinked.
+
+### Look up
+
+```
+GET api/v1/spool?tag=AABBCCDD&limit=1000&allow_archived=true
+```
+
+- Without `allow_archived=true`, archived spools holding the tag are left out.
+- Spoolman older than v0.27.0 ignores `tag` and returns every spool, so results are still filtered client-side.
+
+### Version check
+
+Older servers answer the link call with `404`. Before writing, and in the connection test, the apps read
+`version` from `GET api/v1/info` and refuse native tags below `0.27.0`, with no fallback to `card_uids`. The
+`card_uids` field is neither created nor written while native tags are selected.
+
+### Create spool
+
+`POST api/v1/spool` has no way to set tags, so the spool is created without `extra.card_uids` and the tag is linked
+straight after.
+
+---
+
 ## `card_uids` Custom Field
 
-NFC tag UIDs are stored in a Spoolman custom field named `card_uids` on the spool entity.
+In the Card UIDs store, NFC tag UIDs are stored in a Spoolman custom field named `card_uids` on the spool entity.
 
 ### Field definition (created on first connection test)
 
@@ -193,6 +272,10 @@ When an NFC tag is scanned or assigned to a spool:
 4. **Search** for other spools that contain the same UID by fetching all spools
    (`limit=1000&allow_archived=true`) and filtering client-side on `tagUIDs`.
 5. **Remove** the UID from each other spool's `card_uids` and write back via `PATCH`.
+
+With [native tags](#native-tags) the steps are the same, using the tag endpoints. Step 3 is the `POST` link, which
+takes the tag from a spool still holding it, since a tag can only be on one spool. Steps 4 and 5 find no other spool
+unless a link was added in between.
 
 ---
 

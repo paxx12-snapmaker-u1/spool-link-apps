@@ -11,6 +11,8 @@ enum SpoolmanError: LocalizedError {
     case serverError(Int)
     case spoolNotFound(Int)
     case filamentRequired
+    case nativeTagsUnsupported(String)
+    case tagConflict(String)
 
     var errorDescription: String? {
         switch self {
@@ -26,6 +28,10 @@ enum SpoolmanError: LocalizedError {
             return "Spool \(id) not found"
         case .filamentRequired:
             return "Filament ID required"
+        case .nativeTagsUnsupported(let version):
+            return "Native tags need Spoolman v0.27.0 or newer (server is \(version))"
+        case .tagConflict(let message):
+            return message
         }
     }
 }
@@ -37,6 +43,7 @@ actor SpoolmanAPI {
     private let decoder: JSONDecoder
     private let encoder: JSONEncoder
     private let session: URLSession
+    private var nativeTagsConfirmed = false
 
     init(baseURL: String) {
         self.baseURL = Self.normalizeURL(baseURL)
@@ -53,6 +60,7 @@ actor SpoolmanAPI {
 
     func updateBaseURL(_ newURL: String) {
         self.baseURL = Self.normalizeURL(newURL)
+        self.nativeTagsConfirmed = false
     }
 
     struct ServerInfo: Decodable {
@@ -68,7 +76,7 @@ actor SpoolmanAPI {
         var succeeded: Bool { error == nil }
     }
 
-    static func testConnection(baseURL: String) async -> ConnectionTestResult {
+    static func testConnection(baseURL: String, store: TagStore) async -> ConnectionTestResult {
         var logs: [String] = []
         let normalized = normalizeURL(baseURL)
         let configuration = URLSessionConfiguration.default
@@ -119,6 +127,12 @@ actor SpoolmanAPI {
             if let commit = info.gitCommit { detail += " \(commit)" }
             logs.append("✓ \(detail)")
 
+            if store == .native && !TagStore.supportsNativeTags(version: info.version) {
+                let err = SpoolmanError.nativeTagsUnsupported(info.version)
+                logs.append("✗ \(err.localizedDescription)")
+                return ConnectionTestResult(logs: logs, error: err)
+            }
+
         } catch {
             logs.append("✗ \(error.localizedDescription)")
             return ConnectionTestResult(logs: logs, error: error)
@@ -167,7 +181,9 @@ actor SpoolmanAPI {
             }
         }
 
-        await ensureField(entityType: "spool", key: "card_uids", name: "Card UIDs")
+        if store == .cardUids {
+            await ensureField(entityType: "spool", key: "card_uids", name: "Card UIDs")
+        }
         await ensureField(entityType: "filament", key: "variant", name: "Variant")
 
         return ConnectionTestResult(logs: logs, error: nil)
@@ -224,12 +240,15 @@ actor SpoolmanAPI {
         }
     }
 
-    func findSpoolsByCardUid(_ uid: String) async throws -> [SpoolResponse] {
+    func findSpoolsByCardUid(_ uid: String, store: TagStore) async throws -> [SpoolResponse] {
         var components = URLComponents(string: "\(baseURL)api/v1/spool")!
         components.queryItems = [
             URLQueryItem(name: "limit", value: "1000"),
             URLQueryItem(name: "allow_archived", value: "true"),
         ]
+        if store == .native {
+            components.queryItems?.append(URLQueryItem(name: "tag", value: uid.uppercased()))
+        }
         guard let url = components.url else { throw SpoolmanError.invalidURL }
         let (data, response) = try await session.data(from: url)
         guard let http = response as? HTTPURLResponse else {
@@ -239,13 +258,102 @@ actor SpoolmanAPI {
         guard http.statusCode == 200 else { throw SpoolmanError.serverError(http.statusCode) }
         do {
             let all = try decoder.decode([SpoolResponse].self, from: data)
+            // Filtered in both stores: Spoolman older than v0.27.0 ignores `tag` and returns every spool.
             return all.filter { $0.tagUIDs.contains(uid.uppercased()) }
         } catch {
             throw SpoolmanError.decodingError(error)
         }
     }
 
-    func updateSpoolCardUids(id: Int, uids: [String]) async throws {
+    func requireTagStoreSupport(store: TagStore) async throws {
+        guard store == .native && !nativeTagsConfirmed else { return }
+        guard let url = URL(string: "\(baseURL)api/v1/info") else { throw SpoolmanError.invalidURL }
+        let (data, response) = try await session.data(from: url)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            throw SpoolmanError.serverError((response as? HTTPURLResponse)?.statusCode ?? -1)
+        }
+        let info = try decoder.decode(ServerInfo.self, from: data)
+        guard TagStore.supportsNativeTags(version: info.version) else {
+            throw SpoolmanError.nativeTagsUnsupported(info.version)
+        }
+        nativeTagsConfirmed = true
+    }
+
+    /// Links the tag to the spool. Returns the id of another spool it had to be taken from, if any.
+    @discardableResult
+    func linkTag(to spool: SpoolResponse, uid: String, store: TagStore) async throws -> Int? {
+        let upper = uid.uppercased()
+        if store == .cardUids {
+            let current = spool.tagUIDs
+            if !current.contains(upper) {
+                try await updateSpoolCardUids(id: spool.id, uids: current + [upper])
+            }
+            return nil
+        }
+        try await requireTagStoreSupport(store: store)
+        let (data, status) = try await postNativeTag(spoolId: spool.id, uid: upper)
+        if (200...299).contains(status) { return nil }
+        guard status == 409 else { throw SpoolmanError.serverError(status) }
+        let conflict = try? decoder.decode(TagConflict.self, from: data)
+        guard let holder = conflict?.spoolId, holder != spool.id else {
+            throw SpoolmanError.tagConflict(conflict?.message ?? "Tag \(upper) is already linked")
+        }
+        try await deleteNativeTag(spoolId: holder, uid: upper)
+        let (_, retryStatus) = try await postNativeTag(spoolId: spool.id, uid: upper)
+        guard (200...299).contains(retryStatus) else { throw SpoolmanError.serverError(retryStatus) }
+        return holder
+    }
+
+    func unlinkTag(from spool: SpoolResponse, uid: String, store: TagStore) async throws {
+        if store == .native {
+            try await deleteNativeTag(spoolId: spool.id, uid: uid.uppercased())
+        } else {
+            let remaining = spool.tagUIDs.filter { $0.uppercased() != uid.uppercased() }
+            try await updateSpoolCardUids(id: spool.id, uids: remaining)
+        }
+    }
+
+    func unlinkAllTags(from spool: SpoolResponse, store: TagStore) async throws {
+        if store == .native {
+            for uid in spool.tagUIDs {
+                try await deleteNativeTag(spoolId: spool.id, uid: uid)
+            }
+        } else {
+            try await updateSpoolCardUids(id: spool.id, uids: [])
+        }
+    }
+
+    private struct TagConflict: Decodable {
+        let message: String?
+        let spoolId: Int?
+    }
+
+    private func postNativeTag(spoolId: Int, uid: String) async throws -> (Data, Int) {
+        guard let url = URL(string: "\(baseURL)api/v1/spool/\(spoolId)/tag") else {
+            throw SpoolmanError.invalidURL
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(["uid": uid])
+        let (data, response) = try await session.data(for: request)
+        return (data, (response as? HTTPURLResponse)?.statusCode ?? -1)
+    }
+
+    private func deleteNativeTag(spoolId: Int, uid: String) async throws {
+        guard let url = URL(string: "\(baseURL)api/v1/spool/\(spoolId)/tag/\(uid)") else {
+            throw SpoolmanError.invalidURL
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        let (_, response) = try await session.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+        guard (200...299).contains(status) || status == 404 else {
+            throw SpoolmanError.serverError(status)
+        }
+    }
+
+    private func updateSpoolCardUids(id: Int, uids: [String]) async throws {
         guard let url = URL(string: "\(baseURL)api/v1/spool/\(id)") else {
             throw SpoolmanError.invalidURL
         }
@@ -408,13 +516,16 @@ actor SpoolmanAPI {
 
     func createSpoolFromInfo(
         filamentId: Int,
-        cardUid: String?
+        cardUid: String?,
+        store: TagStore
     ) async throws -> SpoolResponse {
         if filamentId <= 0 {
             throw SpoolmanError.filamentRequired
         }
 
-        let extra: [String: String]? = cardUid.map { ["card_uids": Self.jsonEncodeString($0)] }
+        let extra: [String: String]? = store == .cardUids
+            ? cardUid.map { ["card_uids": Self.jsonEncodeString($0)] }
+            : nil
         guard let spoolUrl = URL(string: "\(baseURL)api/v1/spool") else { throw SpoolmanError.invalidURL }
         var spoolReq = URLRequest(url: spoolUrl)
         spoolReq.httpMethod = "POST"
@@ -424,7 +535,12 @@ actor SpoolmanAPI {
         guard let sh = spoolResp as? HTTPURLResponse, (200...299).contains(sh.statusCode) else {
             throw SpoolmanError.serverError((spoolResp as? HTTPURLResponse)?.statusCode ?? -1)
         }
-        return try decoder.decode(SpoolResponse.self, from: spoolData)
+        let created = try decoder.decode(SpoolResponse.self, from: spoolData)
+        if store == .native, let cardUid {
+            try await linkTag(to: created, uid: cardUid, store: store)
+            return try await getSpool(id: created.id)
+        }
+        return created
     }
 
     private struct UpdateSpoolExtraBody: Encodable {
