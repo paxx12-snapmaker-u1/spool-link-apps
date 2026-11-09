@@ -465,7 +465,10 @@ class SpoolmanViewModel(application: Application) : AndroidViewModel(application
                 scanHistory[idx] = updated
                 lastResult = updated
             }
-            if (spools.isNotEmpty()) refreshSpool(newSpool.id)
+            if (spools.none { it.id == newSpool.id }) {
+                spools.add(0, newSpool)
+            }
+            fetchSpools(reset = true)
         } catch (e: Exception) {
             statusMessage = "Error creating spool: ${e.message}"
         }

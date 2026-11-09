@@ -642,7 +642,10 @@ async function createSpoolFromTag(uidHex, payload, meta) {
       subtype: meta.subtype || null,
     });
     updateStatus(`Spool created: ${spoolDisplayName(newSpool)}`);
-    if (state.spools.length > 0) await refreshSpoolInState(newSpool.id);
+    if (!state.spools.some(s => s.id === newSpool.id)) {
+      state.spools.unshift(newSpool);
+    }
+    await fetchSpools(true);
     return newSpool;
   } catch (e) {
     updateStatus(`Error creating spool: ${e.message}`);

@@ -205,6 +205,9 @@ class SpoolmanViewModel: NFCManagerDelegate {
                 )
                 lastResult = scanHistory[idx]
             }
+            if !spools.contains(where: { $0.id == newSpool.id }) {
+                spools.insert(newSpool, at: 0)
+            }
             fetchSpools(reset: true)
             return newSpool
         } catch {
