@@ -3,3 +3,8 @@
 
 # Python venvs
 .venv/
+
+# Release signing (local only)
+*.jks
+*.keystore
+keystore.env
