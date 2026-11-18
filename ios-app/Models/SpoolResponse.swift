@@ -4,6 +4,33 @@
 
 import Foundation
 
+/// Where tag links live in Spoolman. Must match `tag_store` on the printer, which reads only one store.
+enum TagStore: String, CaseIterable, Sendable {
+    case cardUids = "card_uids"
+    case native
+
+    static let defaultsKey = "tagStore"
+
+    static var current: TagStore {
+        TagStore(rawValue: UserDefaults.standard.string(forKey: defaultsKey) ?? "") ?? .cardUids
+    }
+
+    var displayName: String {
+        switch self {
+        case .cardUids: return "Card UIDs"
+        case .native: return "Spoolman native tags"
+        }
+    }
+
+    static func supportsNativeTags(version: String) -> Bool {
+        guard let match = version.range(of: #"^v?\d+\.\d+\.\d+"#, options: .regularExpression) else {
+            return false
+        }
+        let parts = version[match].drop { $0 == "v" }.split(separator: ".").compactMap { Int($0) }
+        return parts.count == 3 && (parts[0] > 0 || parts[1] >= 27)
+    }
+}
+
 struct SpoolResponse: Codable, Identifiable {
     let id: Int
     let filament: FilamentResponse
@@ -13,6 +40,11 @@ struct SpoolResponse: Codable, Identifiable {
     let registered: Date?
     let lastUsed: Date?
     let extra: ExtraData?
+    let tags: [SpoolTag]?
+
+    struct SpoolTag: Codable {
+        let uid: String?
+    }
 
     struct FilamentResponse: Codable {
         let name: String?
@@ -42,6 +74,14 @@ struct SpoolResponse: Codable, Identifiable {
     var tagCount: Int { tagUIDs.count }
 
     var tagUIDs: [String] {
+        TagStore.current == .native ? nativeTagUIDs : cardUidEntries
+    }
+
+    var nativeTagUIDs: [String] {
+        (tags ?? []).compactMap { $0.uid?.uppercased() }
+    }
+
+    var cardUidEntries: [String] {
         guard let raw = extra?.cardUids, !raw.isEmpty else { return [] }
         let decoded: String
         if let data = raw.data(using: .utf8),
